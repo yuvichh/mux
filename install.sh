@@ -9,7 +9,7 @@
 #
 # These variables change what it does:
 #
-#     MUX_VERSION   the release to install, as v0.3.0   [the latest]
+#     MUX_VERSION   the release to install, as v0.4.0   [the latest]
 #     MUX_INSTALL   the folder to put `mux` in          [~/.local/bin]
 #
 # as in:

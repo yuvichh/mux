@@ -1,8 +1,8 @@
 # Commands
 
-This describes the commands of the coming release 0.4. Release 0.3 has the
-same commands, but its tickets carry no secret and it does not talk to this
-version: see [who may fetch](#who-may-fetch). Release 0.2.0 had `seed`,
+This describes the commands of release 0.4. Release 0.3 had `cp`, `sync`
+and `probe`, with tickets that carried no secret, and it does not talk to
+this version: see [who may fetch](#who-may-fetch). Release 0.2.0 had `seed`,
 `get` and `id` only, under the name `p2rent`.
 
 Progress and notes for people go to standard error. What a command produced
