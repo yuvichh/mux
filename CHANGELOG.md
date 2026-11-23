@@ -32,6 +32,14 @@ first. Each line names the pull request that made the change.
   every ticket did before (#126).
 - `mux probe` says whether a ticket is a swarm's (#126).
 
+- **`mux send` and `mux get`.** `mux send ./photos` gives four words, and
+  `mux get polar-bulb-catalog-range` on another machine fetches the folder
+  into the current directory. The words are for the first machine that
+  uses them, neither machine needs an address of the other, and both
+  commands end by themselves. `mux get` also takes a ticket, a web address
+  or `host:path`. `mux send --ticket` gives a ticket as before (#136).
+- **An offer to one machine ends by itself** when that machine has said it
+  has everything: `send`, and `--once` with a ticket (#136).
 - **Copy from a machine you can `ssh` to**, written as `scp` writes it:
   `mux cp server:/srv/site ./`. Nothing is installed on the other machine
   and nothing is set up: mux runs the system's `ssh`. A copy carries on

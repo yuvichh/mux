@@ -79,6 +79,19 @@ async fn serve_request(
     let small = matches!(request, Request::Status { .. } | Request::Manifest { .. });
     send.set_priority(if small { 1 } else { order })?;
 
+    if request == Request::Offered {
+        // Asked of the node and not of a share: which shares open to the
+        // secret that was shown. None is what a node that holds nothing
+        // answers, too.
+        let reply = match node.offered(&connection.peer(), &call.proof) {
+            Some(offered) if offered.is_empty() => Response::NotFound,
+            Some(offered) => Response::Offered(offered),
+            None => Response::Refused,
+        };
+        proto::write_frame(&mut send, &reply).await?;
+        send.finish()?;
+        return Ok(());
+    }
     match asked_for(node, connection, &request, &call.proof) {
         Ok(share) => answer(connection, turns, &share, request, &mut send).await?,
         Err(turned_away) => proto::write_frame(&mut send, &turned_away).await?,
@@ -102,7 +115,9 @@ fn asked_for(
         Request::Manifest { artifact } => node.share_of_artifact(*artifact),
         Request::Status { content, .. }
         | Request::Hints { content }
-        | Request::Chunk { content, .. } => node.share(*content),
+        | Request::Chunk { content, .. }
+        | Request::Done { content } => node.share(*content),
+        Request::Offered => None,
     };
     let share = share.ok_or(Response::NotFound)?;
     match share.admit(&node.node_id(), &connection.peer(), proof) {
@@ -151,7 +166,16 @@ async fn answer(
                 send.write_all(hints.encoded()).await?;
             }
         }
-        Request::Hints { .. } => proto::write_frame(send, &Response::NotFound).await?,
+        // Hints of a share that is not whole, and a question that was
+        // answered before any share was looked for.
+        Request::Hints { .. } | Request::Offered => {
+            proto::write_frame(send, &Response::NotFound).await?;
+        }
+
+        Request::Done { .. } => {
+            share.note_done(connection.peer());
+            proto::write_frame(send, &Response::Noted).await?;
+        }
 
         Request::Chunk { content, index } => {
             // Never closed, so a turn always comes.

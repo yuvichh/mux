@@ -77,6 +77,16 @@ pub enum Request {
         /// Content whose chunks the receiver wants to find locally.
         content: Hash,
     },
+    /// The artifacts the peer offers to whoever shows the secret this
+    /// request comes with. It is for a machine that knows a secret and not
+    /// yet what it opens, as one that was given a code is.
+    Offered,
+    /// Says that the requester now holds all of this content. A peer that
+    /// offered it to one machine can then stop.
+    Done {
+        /// The content id of what was fetched.
+        content: Hash,
+    },
 }
 
 /// The first frame of an answer.
@@ -104,6 +114,11 @@ pub enum Response {
     /// asks for is offered to other machines, or as many have fetched it
     /// as may.
     Refused,
+    /// The ids of the artifacts the peer offers under the secret that was
+    /// shown.
+    Offered(Vec<Hash>),
+    /// The peer has taken note of what it was told.
+    Noted,
 }
 
 /// What a peer holds of an artifact and whom else it knows.

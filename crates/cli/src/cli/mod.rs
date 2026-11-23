@@ -6,6 +6,7 @@ mod exit;
 mod get;
 mod probe;
 mod seed;
+mod send;
 mod sync;
 mod tell;
 mod ui;
@@ -157,18 +158,22 @@ impl Sharing {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Send files or folders to another machine: gives four words to fetch
+    /// them with, and ends when they have arrived
+    Send(send::Args),
+    /// Fetch what four words, a ticket, a web address or `host:path` names
+    Get(get::Args),
     /// Copy from one place to another
     #[command(override_usage = "mux cp [OPTIONS] <SOURCE>... <DESTINATION>")]
     Cp(cp::Args),
-    /// Say what is at a place, without copying it
-    Probe(probe::Args),
     /// Make a folder hold what a place holds
     Sync(sync::Args),
-    /// Offer files or folders to other machines: `cp PATH... peer:` under
-    /// its first name
+    /// Say what is at a place, without copying it
+    Probe(probe::Args),
+    /// Offer files or folders under a ticket: `send --ticket` under its
+    /// first name
+    #[command(hide = true)]
     Seed(seed::Args),
-    /// Fetch what a ticket names: `cp TICKET DIR/` under its first name
-    Get(get::Args),
     /// Print this machine's node id
     Id,
     /// List the kinds of place this build can read and write
@@ -214,6 +219,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Probe(args) => probe::run(&args, cli.json, cli.key.as_deref()).await,
         Command::Sync(args) => sync::run(&args, cli.json, cli.key.as_deref()).await,
         Command::Seed(args) => seed::run(args, cli.key.as_deref(), cli.json).await,
+        Command::Send(args) => send::run(args, cli.key.as_deref(), cli.json).await,
         Command::Get(args) => get::run(args, cli.json, cli.key.as_deref()).await,
         Command::Id => {
             println!("{}", identity(cli.key.as_deref())?.node_id());

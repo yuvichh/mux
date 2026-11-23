@@ -8,6 +8,57 @@ version: see [who may fetch](#who-may-fetch). Release 0.2.0 had `seed`,
 Progress and notes for people go to standard error. What a command produced
 goes to standard output, so it can be piped.
 
+## The short way: `mux send` and `mux get`
+
+```console
+$ mux send ./photos
+seeding  photos  (4.29 MiB, 7 chunks)
+code     polar-bulb-catalog-range
+on the other machine, run:  mux get polar-bulb-catalog-range
+sent     to 1 machine, which has all of it  (4.29 MiB uploaded)
+```
+
+```console
+$ mux get polar-bulb-catalog-range
+./photos	4500007	verified
+```
+
+`mux send <PATH>...` offers files or folders to one other machine and gives
+**four words** for them. `mux get` with those words, on any other machine,
+fetches them into the current folder. Both commands end by themselves:
+`send` when the other machine has said it has everything.
+
+- The words are all there is to pass on. They can be read out, typed from
+  another screen, or sent in a chat.
+- They are read however they are typed: `Polar Bulb Catalog Range`, with
+  dots or commas between them, and each word by its first four letters
+  (`pola-bulb-cata-rang`).
+- They are for **the first machine that uses them**, and no other. A second
+  machine that has them ends with 7.
+- Other words find nothing, and end with 3.
+- Neither machine needs an address or a port of the other: they find each
+  other by way of the relays. With `--no-relay`, `send` says what to add:
+  `mux get WORDS --no-relay --at HOST:PORT`.
+- A copy that was cut off carries on: run `mux get` with the same words
+  again, while `send` still runs.
+
+`mux get <WHAT> [FOLDER]` fetches anything that can be fetched: four words,
+a ticket, a web address, or `host:path` on a machine reached by SSH. The
+folder is the current one unless another is named.
+
+```console
+$ mux get https://example.org/big.iso
+$ mux get server:/srv/site ./sites/
+$ mux get 'mux://450b9c6b…' ./models/
+```
+
+For more than one machine, `mux send --ticket` gives a ticket in place of
+the words and runs until it is stopped. `--to`, `--once` and `--swarm` go
+with it: see [who may fetch](#who-may-fetch).
+
+How four words can stand for an offer is in
+[how it works](how-it-works.md#four-words-in-place-of-a-ticket).
+
 ## `mux cp`
 
 ```console
@@ -180,7 +231,7 @@ Three flags narrow or widen this, for `cp` to `peer:`, for `seed`, and for
 | --- | --- |
 | none | Whoever has the ticket, from this machine. |
 | `--to <NODE>` | Only that machine, with the ticket. `NODE` is what `mux id` prints there. Repeatable. A ticket that reaches anyone else is of no use to them. |
-| `--once` | Only the first machine that asks with the ticket. It can ask again, to carry on with a copy that was cut short. Every machine after it is refused. |
+| `--once` | Only the first machine that asks with the ticket. It can ask again, to carry on with a copy that was cut short. Every machine after it is refused. The command ends by itself when that machine has said it has everything. |
 | `--swarm` | Whoever has the ticket, from this machine and from each other. |
 
 ```console
@@ -274,19 +325,22 @@ same for `cp`, `probe`, `seed` and `get`:
 | `--congestion <cubic\|bbr>` | How a connection decides how fast to send. `cubic`, the default, halves its rate at each lost packet. `bbr` holds the rate the link carries whatever is lost: many times faster over a link that loses one packet in a hundred, and somewhat slower than `cubic` on a link that loses none. It is the sender's choice, so give it to the machine that offers. |
 | `--key <FILE>` | This machine's key, which is its name to other machines. Also `MUX_KEY`. It is made the first time a command has to do with another machine. |
 
-## `mux seed` and `mux get`
+## `mux seed`, and the flags of `mux get`
 
-`mux seed <PATH>...` is `mux cp <PATH>... peer:`, and `mux get <TICKET>
---out <FOLDER>` is `mux cp <TICKET> <FOLDER>/`. They came first and are the
-same code: what one prints, takes with `--json` and ends with, the other
-does. `seed` takes `--to`, `--once` and `--swarm`, and so does `get` with
-`--seed`. Three flags are theirs alone:
+`mux seed <PATH>...` is `mux send --ticket <PATH>...` and
+`mux cp <PATH>... peer:` under its first name, and `mux get <WHAT> [FOLDER]`
+is `mux cp <WHAT> <FOLDER>/`. They are the same code: what one prints,
+takes with `--json` and ends with, the other does. `seed` takes `--to`,
+`--once` and `--swarm`, and so does `get` with `--seed`. These flags are
+theirs alone:
 
 | Flag | |
 | --- | --- |
 | `seed --advertise <HOST[:PORT]>` | An address to put in the ticket for other machines to dial. Repeatable. |
 | `seed --chunk-size <SIZE>` | 4K to 16M. The default is 1M. |
-| `get --peer <NODE[@HOST:PORT]>` | Another machine to try, as well as those in the ticket. Repeatable. A ticket can name it too: `…&peer=NODE@HOST:PORT`. |
+| `get --peer <NODE[@HOST:PORT]>` | Another machine to try, as well as those in a ticket. Repeatable. A ticket can name it too: `…&peer=NODE@HOST:PORT`. |
+| `get --at <HOST:PORT>` | Where the machine that gave four words is, when no relay is used to find it. Repeatable. |
+| `get --out <FOLDER>` | The folder, as a flag: `get` took it so before. |
 
 ## `mux probe`
 
@@ -437,7 +491,8 @@ field away or changes what one means.
 | `done` | A copy is finished. | `path`, `bytes`, `checked`, `fetched`, and `kept` from an earlier copy |
 | `plan` | In place of all the above, with `--dry-run`. | `source`, `destination`, `path`, `bytes`, `files`, `checked` |
 | `probe` | The answer of `mux probe`. | `place`, `name`, `kind`, `bytes`, `files`, `checked`, `parts`, and `digests`, a list of `path` and `digest`. For a ticket also `swarm`, whether its holders fetch from each other; `holders`, a list of `node` and `bytes`: how much of it that machine has, or `null` if it could not be asked; and `origins`, a list of `address` and `unused`: why a copy would not read from that web address, or `null` if it would |
-| `offer` | A path is offered to other machines: by `cp` to `peer:`, by `seed`, or after a copy with `--seed`. | `ticket`, `name`, `bytes`, `files` |
+| `offer` | A path is offered to other machines: by `send`, by `cp` to `peer:`, by `seed`, or after a copy with `--seed`. | `ticket`, `name`, `bytes`, `files`, and `code`, the four words, if the offer has them |
+| `sent` | What was offered to one machine has arrived there whole, and the command ends. | `bytes` uploaded, `machines` |
 | `step` | One thing a sync does, or would do with `--dry-run`. | `step` and `path`, as on standard output without `--json` |
 | `synced` | A sync is finished. | `source`, `destination`, how many paths got each step (`add`, `replace`, `touch`, `remove`, `keep`, `blocked`), `bytes` in files added or replaced, `fetched` bytes read from suppliers, `kept` bytes reused in those files, and `trash` holding replacements and deletions (or `null`) |
 | `sync_plan` | In place of `synced`, with `--dry-run`. | The planned counts and `bytes` |
@@ -467,7 +522,7 @@ They are the same for every command and do not change between versions.
 | 0 | Done. | |
 | 1 | It failed for a reason not listed below. | |
 | 2 | The command line is wrong, or names a place that cannot be used. | No. |
-| 3 | Nothing is at the source. | No. |
+| 3 | Nothing is at the source, or no machine answers to the four words. | No. |
 | 4 | The source could not be reached, or stopped sending. | Yes: it carries on with what it stored. |
 | 5 | The source changed while it was being read. | Yes: it copies the source as it is now. |
 | 6 | What arrived is not what was asked for: it does not have the digest given. | No. |

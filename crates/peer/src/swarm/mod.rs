@@ -8,9 +8,10 @@ mod share;
 
 pub use download::{
     DownloadOptions, Found, Holder, Phase, Progress, Report, announce, download, fetch, find,
-    holders,
+    holders, tickets,
 };
 pub use model::access::{Guests, Secret};
+pub use model::code::Code;
 pub use model::ticket::{Ticket, TicketPeer, Whereabouts};
 pub use node::Node;
 pub use share::{Access, Share};

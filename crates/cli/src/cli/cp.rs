@@ -77,13 +77,15 @@ pub(super) struct Get {
 }
 
 impl Args {
-    /// What `mux get` means: what `ticket` names, copied into `folder`.
-    pub(super) fn get(ticket: String, folder: String, told: Get) -> Self {
+    /// What `mux get` means: what each of `sources` names, copied into
+    /// `folder`.
+    pub(super) fn get(mut sources: Vec<String>, folder: String, told: Get) -> Self {
+        sources.push(folder);
         Self {
-            places: vec![ticket, folder],
+            places: sources,
             hash: None,
             mirror: Vec::new(),
-            streams: 1,
+            streams: 8,
             stall_timeout: told.stall_timeout,
             dry_run: false,
             seed: told.seed,

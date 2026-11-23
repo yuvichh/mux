@@ -46,6 +46,11 @@ pub enum Error {
     #[error("no reachable peer could provide the manifest")]
     ManifestUnavailable,
 
+    /// No machine answers to a code: it was typed wrong, the offer is over,
+    /// or the machine that made it cannot be reached.
+    #[error("no machine answers to that code: it may be typed wrong, or the offer may be over")]
+    NothingOffered,
+
     /// A peer knows this machine has the ticket, and still does not let it
     /// fetch: what the ticket names is offered to other machines, or as
     /// many have fetched it as may.

@@ -18,6 +18,7 @@ extern crate alloc;
 pub mod access;
 pub mod artifact;
 pub mod assembly;
+pub mod code;
 mod error;
 pub mod hex;
 pub mod location;

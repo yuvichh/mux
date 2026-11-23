@@ -69,10 +69,16 @@ pub(super) enum Line<'a> {
     /// Something is offered to other machines, and this is its ticket.
     Offer {
         ticket: &'a str,
+        /// The four words that stand for the offer, if it has them.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<&'a str>,
         name: &'a str,
         bytes: u64,
         files: u64,
     },
+    /// What was offered to one machine has arrived there whole, and the
+    /// command ends.
+    Sent { bytes: u64, machines: u64 },
     /// One thing a sync does, or with a dry run, would do.
     Step { step: &'a str, path: &'a str },
     /// Everything a sync did, after its steps.
@@ -330,11 +336,29 @@ mod tests {
             (
                 Line::Offer {
                     ticket: "mux://aa?peer=bb",
+                    code: None,
                     name: "a",
                     bytes: 5,
                     files: 2,
                 },
                 r#"{"v":1,"event":"offer","ticket":"mux://aa?peer=bb","name":"a","bytes":5,"files":2}"#,
+            ),
+            (
+                Line::Offer {
+                    ticket: "mux://aa?peer=bb",
+                    code: Some("harbor-velvet-piano-sunset"),
+                    name: "a",
+                    bytes: 5,
+                    files: 2,
+                },
+                r#"{"v":1,"event":"offer","ticket":"mux://aa?peer=bb","code":"harbor-velvet-piano-sunset","name":"a","bytes":5,"files":2}"#,
+            ),
+            (
+                Line::Sent {
+                    bytes: 5,
+                    machines: 1,
+                },
+                r#"{"v":1,"event":"sent","bytes":5,"machines":1}"#,
             ),
         ];
         for (line, written) in lines {
