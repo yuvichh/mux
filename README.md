@@ -121,17 +121,17 @@ For scripting, `--json` writes one JSON object per line. See the [command
 reference](docs/commands.md) for exit codes, checksum verification, mirrors
 and relay options.
 
-**Upgrading from p2rent 0.2?** Install mux on every participating machine
-and generate new tickets. Mux keeps the existing device identity on first
-use. See the [migration notes][release].
+**Upgrading from 0.3?** 0.4 does not talk to 0.3. Install it on every
+machine that takes part, and make tickets again. See the
+[release notes][release].
 
 [How it works](docs/how-it-works.md) · [Performance](docs/performance.md) ·
 [Architecture](docs/architecture.md) · [Changelog](CHANGELOG.md) ·
 [Contributing](CONTRIBUTING.md) · [MIT license](LICENSE)
 
-[release]: https://github.com/yuvichh/mux/releases/tag/v0.3.0
-[mac-arm]: https://github.com/yuvichh/mux/releases/download/v0.3.0/mux-Darwin-arm64
-[mac-intel]: https://github.com/yuvichh/mux/releases/download/v0.3.0/mux-Darwin-x86_64
-[linux-arm]: https://github.com/yuvichh/mux/releases/download/v0.3.0/mux-Linux-aarch64
-[linux-intel]: https://github.com/yuvichh/mux/releases/download/v0.3.0/mux-Linux-x86_64
-[windows]: https://github.com/yuvichh/mux/releases/download/v0.3.0/mux.exe
+[release]: https://github.com/yuvichh/mux/releases/tag/v0.4.0
+[mac-arm]: https://github.com/yuvichh/mux/releases/download/v0.4.0/mux-Darwin-arm64
+[mac-intel]: https://github.com/yuvichh/mux/releases/download/v0.4.0/mux-Darwin-x86_64
+[linux-arm]: https://github.com/yuvichh/mux/releases/download/v0.4.0/mux-Linux-aarch64
+[linux-intel]: https://github.com/yuvichh/mux/releases/download/v0.4.0/mux-Linux-x86_64
+[windows]: https://github.com/yuvichh/mux/releases/download/v0.4.0/mux.exe

@@ -64,6 +64,17 @@ fn code(text: &str) -> Option<Code> {
     text.parse().ok()
 }
 
+/// `path` written as a folder, with a separator at its end, so that one
+/// that is not there yet is made. One that is written so already is left
+/// as it is.
+fn as_a_folder(path: &Path) -> String {
+    let mut written = path.display().to_string();
+    if !written.ends_with(['/', MAIN_SEPARATOR]) {
+        written.push(MAIN_SEPARATOR);
+    }
+    written
+}
+
 pub(super) async fn run(args: Args, json: bool, key: Option<&Path>) -> anyhow::Result<()> {
     let (sources, node) = match code(&args.what) {
         // The words stand for a ticket for each thing that is offered.
@@ -94,8 +105,7 @@ pub(super) async fn run(args: Args, json: bool, key: Option<&Path>) -> anyhow::R
         .folder
         .or(args.out)
         .unwrap_or_else(|| PathBuf::from("."));
-    // Written as a folder, so that one that is not there yet is made.
-    let folder = format!("{}{MAIN_SEPARATOR}", folder.display());
+    let folder = as_a_folder(&folder);
     let told = Get {
         seed: args.seed,
         max_peers: args.max_peers,
@@ -108,7 +118,18 @@ pub(super) async fn run(args: Args, json: bool, key: Option<&Path>) -> anyhow::R
 
 #[cfg(test)]
 mod tests {
-    use super::code;
+    use super::{as_a_folder, code};
+    use std::path::{MAIN_SEPARATOR, Path};
+
+    #[test]
+    fn a_folder_is_written_with_one_separator_at_its_end() {
+        let ends = |text: &str| format!("{text}{MAIN_SEPARATOR}");
+        assert_eq!(as_a_folder(Path::new("out")), ends("out"));
+        assert_eq!(as_a_folder(Path::new(".")), ends("."));
+        // Typed as a folder already: nothing is added.
+        assert_eq!(as_a_folder(Path::new("out/")), "out/");
+        assert_eq!(as_a_folder(Path::new(&ends("out"))), ends("out"));
+    }
 
     #[test]
     fn four_words_are_a_code_and_a_place_is_not() {

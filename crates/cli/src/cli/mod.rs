@@ -249,9 +249,15 @@ async fn node(key: Option<&Path>, reach: &Reach) -> anyhow::Result<Arc<Node>> {
 const LEAVE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Closes the node's connections and stops serving.
-async fn leave(node: &Node) {
-    // Whether it was heard back from in time or not, the command is over.
-    let _ = tokio::time::timeout(LEAVE, node.shutdown()).await;
+async fn leave(node: &Arc<Node>) {
+    if tokio::time::timeout(LEAVE, node.shutdown()).await.is_err() {
+        // The other machines were told at once. What is cut short is the
+        // wait to hear them say so back. The library takes a node that is
+        // let go of in the middle of that for one that was never closed,
+        // and says so as an error. So this node is not let go of at all:
+        // the program is ending, and takes it along.
+        std::mem::forget(Arc::clone(node));
+    }
 }
 
 /// This machine's key, created on first use.

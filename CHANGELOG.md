@@ -3,7 +3,13 @@
 What changed for someone who uses `mux`, release by release. The newest is
 first. Each line names the pull request that made the change.
 
-## Unreleased
+## 0.4.0
+
+[Release notes and downloads](https://github.com/yuvichh/mux/releases/tag/v0.4.0)
+
+Four words in place of a ticket, copies from and to any machine you can
+`ssh` to, a secret in every ticket, and small files up to twenty times as
+fast.
 
 ### Coming from 0.3.0
 
