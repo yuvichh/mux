@@ -375,8 +375,24 @@ rsync 3.5, and the laptop the `openrsync` that macOS ships.
   A second run of a finished copy of the 3,000 files reads nothing and
   takes 0.3 s.
 
-Not yet in this table: `rclone`, and the tools that need no SSH (`croc`,
-`sendme`, `magic-wormhole`), which are to be timed against a ticket.
+The same copies were timed again once the flush was shared, with `rclone`
+1.76 beside the others. The link carried about 26 MiB/s that day. Three
+rounds of the small files and two of the large one, the tools taking
+turns:
+
+| | One file of 512 MiB | 3,000 files of 16 KiB (47 MiB) |
+| --- | ---: | ---: |
+| `mux cp` | 20.1 to 20.3 s | 2.4 s |
+| `rsync -a` | 19.2 to 20.9 s | 2.0 to 2.4 s |
+| `scp` | 19.6 to 19.9 s | not timed again |
+| `rclone copy` | 23.1 to 23.3 s | 104 to 116 s |
+| `rclone copy --transfers 16 --checkers 16` | | 39 to 65 s |
+
+`rclone` reached the machine with `--sftp-ssh "ssh host"`, so that it used
+the same `ssh` as the others. On small files mux is now level with
+`rsync`, and forty times as fast as `rclone` as it comes.
+
+The tools that need no SSH are in [Next to croc and sendme](#next-to-croc-and-sendme).
 
 ## Small files and the flush
 
@@ -494,6 +510,50 @@ What is left is the finding. Of the 1.5 s, 0.25 s is the lookup of the key,
 3.5 s a sender needs to be reachable is iroh's report on the network, which
 on a network with no working IPv6 waits three seconds for an answer that
 does not come. Neither was changed.
+
+## Next to croc and sendme
+
+`mux send` and `mux get` are for two machines that cannot `ssh` to one
+another. The tools people reach for there are `croc` and `sendme`, and
+`sendme` is built on the same library as mux (iroh).
+
+A Linux machine sent and a laptop on Wi-Fi received, both on one home
+network, each tool as it comes: its own relays, its own defaults, nothing
+told about the other machine. croc 11.6.5 and sendme 0.37.1, the builds
+their projects release. The receiver was started by a program the moment
+the sender had shown its code or ticket, and is timed from then to its end.
+The tools took turns.
+
+| | Until a program has the code | 8 files, 4 MiB | 3,000 files of 16 KiB | One file of 512 MiB |
+| --- | ---: | ---: | ---: | ---: |
+| `mux send`, `mux get` | 3.6 to 3.8 s | 2.0 to 2.4 s | 3.8 to 3.9 s | 12.6 to 20.6 s |
+| `sendme` | 3.6 to 3.7 s | 2.5 to 3.0 s | 4.7 to 5.8 s | 12.9 to 21.0 s |
+| `croc` | 0.1 to 0.5 s | 6.1 to 8.3 s | 26.5 to 40.5 s | 142 to 229 s |
+
+Four runs of the small folder, three to five of the 3,000 files, six of
+the large file for mux and sendme and two for croc.
+
+- **A large file**: mux and sendme are level, and the link is the limit.
+  It carried 25 MiB/s when the runs began and 40 MiB/s when they ended,
+  and the two tools moved together: 20.3 and 21.0 s in the first round of
+  four, 12.6 and 12.9 s in the last.
+- **Many small files**: mux takes three quarters of the time sendme does,
+  and a tenth of croc's. One of croc's five runs ended without the two
+  sides finding each other.
+- **croc was slow here for a reason that is not croc's design.** It said
+  it received from the home network's public address: the bytes went out
+  to the router and back, at 2 to 4 MiB/s. On a network where its search
+  for the other machine works it is faster than this.
+- **The wait before a code.** croc has a code at once, because all it
+  needs is its relay. mux and sendme need 3.6 s: iroh's report on the
+  network, which here waits three seconds for an answer over IPv6 that
+  does not come. mux shows the words to a person after 0.1 to 0.2 s all the
+  same, and holds them back only from a program
+  ([above](#four-words-before-the-copy-starts)).
+- What each makes last: mux flushes every file to the disk before it has
+  its name. croc and sendme do not flush.
+
+Not timed: `magic-wormhole`.
 
 ## Web downloads
 
