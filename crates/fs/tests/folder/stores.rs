@@ -346,6 +346,83 @@ fn a_file_has_its_final_name_only_once_it_is_whole() {
     assert!(!out.join("bundle/nested/b.bin").exists());
 }
 
+/// A copy that is run again leaves alone each file that is there with the
+/// size and the time of its source, without reading it, and fetches the
+/// rest: a file that is missing, and one whose time is another.
+#[test]
+fn a_copy_run_again_fetches_only_what_is_missing_or_changed() {
+    use model::place::Source;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = sample_tree(tmp.path());
+    let indexed = index(&root, MIN_CHUNK_SIZE, &|_| {}).unwrap();
+    let tree = indexed.artifact.tree().clone();
+    let source: Arc<dyn Source> = Arc::new(::fs::Folder::whole(tree, indexed.root));
+    let out = tmp.path().join("out");
+    let copy = || {
+        let open = |tree: &Arc<Tree>| Arc::new(::fs::Folder::inside(tree.clone(), &out));
+        let options = engine::Options::default();
+        let copying = engine::copy(
+            vec![source.clone()],
+            None,
+            MIN_CHUNK_SIZE,
+            open,
+            options,
+            Arc::new(|_| {}),
+        );
+        crate::common::wait(copying).unwrap()
+    };
+    let total = (CS * 3 + 17 + CS + 5) as u64;
+    let first = copy();
+    assert_eq!((first.fetched, first.resumed), (total, 0));
+
+    let (a, b, c) = (
+        out.join("bundle/a.bin"),
+        out.join("bundle/nested/b.bin"),
+        out.join("bundle/nested/deep/c.bin"),
+    );
+    // One file is gone, and one is of another time. The third is as it
+    // should be, with what an earlier try left beside it.
+    fs::remove_file(&b).unwrap();
+    let another = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    let touched = fs::File::options().write(true).open(&c).unwrap();
+    touched.set_modified(another).unwrap();
+    drop(touched);
+    fs::write(part(&a), b"left by an earlier try").unwrap();
+    // A file that is rewritten is another file: the one that is kept is
+    // the very one that was there.
+    #[cfg(unix)]
+    let was = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&a).unwrap());
+
+    let again = copy();
+    assert_eq!(
+        (again.fetched, again.resumed),
+        ((CS + 5) as u64, (CS * 3 + 17) as u64)
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::ino(&fs::metadata(&a).unwrap()),
+        was
+    );
+    for path in ["a.bin", "empty", "nested/b.bin", "nested/deep/c.bin"] {
+        let copied = out.join("bundle").join(path);
+        assert_eq!(
+            fs::read(&copied).unwrap(),
+            fs::read(root.join(path)).unwrap()
+        );
+        assert!(!part(&copied).exists(), "{path} has a part file left");
+        let (ours, theirs) = (fs::metadata(&copied), fs::metadata(root.join(path)));
+        assert_eq!(
+            ours.unwrap().modified().ok(),
+            theirs.unwrap().modified().ok()
+        );
+    }
+
+    // And a third time there is nothing to do.
+    let third = copy();
+    assert_eq!((third.fetched, third.resumed), (0, 0));
+    assert!(third.verification.is_none());
+}
+
 /// The sample tree as a folder to write into, with nothing in it yet, and
 /// the position of each file among its entries.
 fn opened(

@@ -256,6 +256,15 @@ copies what a source holds into a place: it asks the source what it holds,
 leaves alone a file that is already there with the same size and time,
 fetches the rest, and says how far the bytes were checked.
 
+That is asked of each file by itself (`Sink::is_current`). A file the
+place says yes to is taken as it is: the engine tells the place so
+(`Sink::keep`) before the place is made ready, the place looks at nothing
+of it, and its chunks count as held with no digest learned for them. A
+place still reports as held only chunks it has checked against a digest.
+So a copy that was cut off, run again, fetches the files that are missing
+and the rest of the one that was in flight, and a copy that kept any file
+this way is `consistent` and not `verified`, whatever digests were given.
+
 `engine::copy` takes several sources that hold the same files, such as
 several addresses for one file, and each chunk then comes from whichever
 is free to send it. It does so only if a digest of every file is known.

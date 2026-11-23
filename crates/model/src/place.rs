@@ -327,13 +327,29 @@ pub trait Sink: fmt::Debug + Send + Sync {
     /// a tree that records no time, says no.
     ///
     /// This is how a transfer with no digests leaves alone a file that is
-    /// already there. It is weaker than a digest, and is used only where
-    /// there is none.
+    /// already there: see [`Sink::keep`]. It is weaker than a digest, and
+    /// is used only where there is none.
     ///
     /// # Errors
     ///
     /// Returns a failure if the place cannot be looked at.
     fn is_current(&self, file: usize) -> Result<bool, Failure>;
+
+    /// Takes what is committed for `file` as the file, as it is and without
+    /// reading it. It is asked only of a file that [`Sink::is_current`] has
+    /// said yes to, in a transfer with no digests, and before
+    /// [`Sink::begin`]. Whatever an earlier try at the file left beside it
+    /// is thrown away, and `begin` finds nothing of the file to look at.
+    ///
+    /// The chunks of such a file are not among those `begin` reports: those
+    /// are the ones the place has checked. They count as held on the
+    /// strength of this call, which is the engine's to make.
+    ///
+    /// # Errors
+    ///
+    /// Returns a failure if what was left beside the file cannot be
+    /// thrown away.
+    fn keep(&self, file: usize) -> Result<(), Failure>;
 
     /// Finishes the tree once every file is committed, and makes the names
     /// that were given last through a power cut. A file that is still held

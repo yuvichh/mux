@@ -76,7 +76,7 @@ impl Plan {
     ///
     /// Returns a failure if the place cannot be looked at.
     pub async fn is_in<P: Sink + 'static>(&self, place: &Arc<P>) -> Result<bool, Failure> {
-        is_current(&self.tree, place).await
+        Ok(all_of_them(&self.tree, &current(&self.tree, place).await?))
     }
 }
 
@@ -166,7 +166,11 @@ where
     });
     let place = open(&tree);
 
-    if planned.is_in(&place).await? {
+    // Each file that is there with the size and the time the source gives
+    // is left alone and not read, whatever the others are: a copy that was
+    // cut off fetches what is missing, as one that never ran fetches all.
+    let there = current(&tree, &place).await?;
+    if all_of_them(&tree, &there) {
         observer(Event::Kept {
             bytes: tree.total_size(),
         });
@@ -184,7 +188,7 @@ where
         let observer = observer.clone();
         move |bytes| observer(Event::Examined { bytes })
     };
-    let store = Store::learn(tree.clone(), place, planned.known, examined).await?;
+    let store = Store::learn_beside(tree.clone(), place, planned.known, there, examined).await?;
     let held: u64 = (0..tree.chunk_count())
         .filter(|&index| store.has(index))
         .filter_map(|index| tree.locate(index))
@@ -269,28 +273,40 @@ async fn describe(sources: &[Arc<dyn Source>]) -> Result<Description, Failure> {
     Ok(first)
 }
 
-/// See [`Plan::is_in`].
-async fn is_current<P: Sink + 'static>(tree: &Arc<Tree>, place: &Arc<P>) -> Result<bool, Failure> {
+/// For each entry of `tree`, whether it is a file that is in `place`
+/// already, as far as size and time can tell.
+async fn current<P: Sink + 'static>(
+    tree: &Arc<Tree>,
+    place: &Arc<P>,
+) -> Result<Vec<bool>, Failure> {
     let (tree, place) = (tree.clone(), place.clone());
     let looked = tokio::task::spawn_blocking(move || {
-        let mut files = tree
-            .entries()
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.is_file());
-        let mut any = false;
-        files
-            .try_fold(true, |all, (file, _)| {
-                any = true;
-                Ok(all && place.is_current(file)?)
-            })
-            .map(|all| all && any)
+        let entries = tree.entries().iter().enumerate();
+        entries
+            .map(|(file, entry)| Ok(entry.is_file() && place.is_current(file)?))
+            .collect()
     });
     looked.await.unwrap_or_else(|stopped| {
         Err(Failure::Fatal(format!(
             "looking at what is already there was cut short: {stopped}"
         )))
     })
+}
+
+/// Whether every file of `tree` is among those `there` says yes to. A tree
+/// with no file in it is not: there is nothing to go by. See
+/// [`Plan::is_in`].
+fn all_of_them(tree: &Tree, there: &[bool]) -> bool {
+    let mut files = tree
+        .entries()
+        .iter()
+        .zip(there)
+        .filter(|(e, _)| e.is_file());
+    let mut any = false;
+    files.all(|(_, &is_there)| {
+        any = true;
+        is_there
+    }) && any
 }
 
 #[cfg(test)]
@@ -567,6 +583,64 @@ mod tests {
             assert_eq!(again.verification.is_none(), fetched_again == 0);
             assert_eq!(again.artifact.is_none(), fetched_again == 0);
             assert!(holds_the_sample(&place, &sample));
+        }
+    }
+
+    /// A copy that was cut off leaves some files whole and others not there
+    /// at all. The next one fetches what is missing and leaves alone each
+    /// file that is there with the size and the time of the source,
+    /// whatever the others are. What it kept that way it has not checked,
+    /// and it says so.
+    #[test]
+    fn a_copy_fetches_the_files_that_are_missing_and_no_others() {
+        let sample = Sample::new().unwrap();
+        let total = sample.artifact.total_size();
+        let sizes = sample.files.iter().map(Vec::len);
+        let (missing, size) = (0..).zip(sizes).max_by_key(|&(_, size)| size).unwrap();
+        let size = size as u64;
+        assert!(size > 0 && size < total, "the sample has several files");
+
+        for digests in [false, true] {
+            let timed = || Told {
+                modified: Some(Timestamp {
+                    seconds: 7,
+                    nanos: 0,
+                }),
+                ..source(&sample, &sample.files, known(&sample, digests))
+            };
+            // The tree a copy from this source makes, and a place that
+            // holds every file of it but one.
+            let (first, _) = copy_into(None, vec![timed()], Options::default());
+            let tree = first.unwrap().tree;
+            let mut there = sample.files.clone();
+            there[missing].clear();
+            let place = Memory::holding(tree, &there).unwrap();
+
+            let (again, place, events) =
+                copy_as(Some(place), vec![timed()], None, Options::default());
+            let again = again.unwrap();
+            assert_eq!((again.fetched, again.resumed), (size, total - size));
+            assert_eq!(again.from, [size]);
+            assert!(holds_the_sample(place.as_ref().unwrap(), &sample));
+            // Told of as kept before anything is fetched, and the one file
+            // that was fetched is the one that is told of as named.
+            let kept = Event::Kept {
+                bytes: total - size,
+            };
+            let kept = events.iter().position(|event| *event == kept);
+            let stored = events
+                .iter()
+                .position(|event| matches!(event, Event::Stored { .. }));
+            assert!(kept.is_some() && kept < stored, "{events:?}");
+            let named: Vec<&Event> = events
+                .iter()
+                .filter(|event| matches!(event, Event::Committed { .. }))
+                .collect();
+            assert_eq!(named, [&Event::Committed { file: missing }]);
+            // A digest of each file was given or not: the files that were
+            // kept were held to none.
+            assert_eq!(again.verification, Some(Verification::Consistent));
+            assert!(again.artifact.is_none());
         }
     }
 
