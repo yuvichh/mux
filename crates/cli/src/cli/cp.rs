@@ -140,21 +140,26 @@ pub(super) async fn run(args: Args, json: bool, key: Option<&Path>) -> anyhow::R
     let mut fetched: Vec<Report> = Vec::new();
     let mut saved: Vec<Saved> = Vec::new();
     let mut outcome = Ok(());
+    // A machine to copy to is reached once, for every source.
+    #[cfg(feature = "ssh")]
+    let there = match &to {
+        Location::Remote(remote) => Some(There::reach(remote, &args, &sources).await?),
+        _ => None,
+    };
+    let written = to.to_string();
     for source in sources {
-        let Location::Local(to) = &to else {
-            let why = match &to {
-                Location::Remote(_) => {
-                    "Copying to a machine reached by SSH is not there yet: mux copies from one."
-                }
-                _ => {
-                    "It copies into a folder, or to `peer:`, which offers a file or a folder \
-                     to other machines."
-                }
-            };
-            return misuse(format!(
-                "`cp` cannot copy from {} to {to}. {why}",
-                source.in_a_message()
-            ));
+        let to: &str = match &to {
+            Location::Local(to) => to,
+            #[cfg(feature = "ssh")]
+            Location::Remote(_) => &written,
+            _ => {
+                return misuse(format!(
+                    "`cp` cannot copy from {} to {written}. It copies into a folder, to a \
+                     machine reached by SSH, or to `peer:`, which offers a file or a folder to \
+                     other machines.",
+                    source.in_a_message()
+                ));
+            }
         };
         let from = source.to_string();
         let copy = Copy {
@@ -162,6 +167,8 @@ pub(super) async fn run(args: Args, json: bool, key: Option<&Path>) -> anyhow::R
             to,
             args: &args,
             json,
+            #[cfg(feature = "ssh")]
+            there: there.as_ref(),
         };
         let copied = if let Location::Ticket(ticket) = &source {
             // Asked before a node is made: a command that is refused opens
@@ -398,11 +405,7 @@ pub(super) async fn sources(
 /// folder of it is listed, and none of it is read yet.
 #[cfg(feature = "ssh")]
 async fn on_another_machine(remote: &mux::Remote) -> anyhow::Result<Vec<Arc<dyn Source>>> {
-    let mut how = mux::ssh::Options::default();
-    // Another program to run in place of `ssh`, as `GIT_SSH` is for git.
-    if let Some(program) = std::env::var_os("MUX_SSH").filter(|program| !program.is_empty()) {
-        how.program = program;
-    }
+    let how = how_to_reach();
     let found = mux::ssh::Remote::find(&remote.host, remote.port, &remote.path, &how).await?;
     if found.skipped() > 0 {
         eprintln!(
@@ -474,6 +477,99 @@ struct Copy<'a> {
     to: &'a str,
     args: &'a Args,
     json: bool,
+    /// The machine the copy goes to, if it is not this one.
+    #[cfg(feature = "ssh")]
+    there: Option<&'a There>,
+}
+
+/// A machine reached by SSH to copy to, and where on it.
+#[cfg(feature = "ssh")]
+struct There {
+    machine: mux::ssh::Machine,
+    remote: mux::Remote,
+}
+
+#[cfg(feature = "ssh")]
+impl There {
+    /// Reaches the machine `remote` is on, if `sources` can be copied to
+    /// one.
+    async fn reach(
+        remote: &mux::Remote,
+        args: &Args,
+        sources: &[Location],
+    ) -> anyhow::Result<Self> {
+        if sources
+            .iter()
+            .any(|source| matches!(source, Location::Ticket(_)))
+        {
+            return misuse(
+                "what a ticket names is fetched into a folder of this machine. Copying it on to \
+                 a machine reached by SSH is not there yet: fetch it here, and copy the folder.",
+            );
+        }
+        if args.seed {
+            return misuse(
+                "--seed offers what was copied to this machine, and this copy goes to another",
+            );
+        }
+        let machine = mux::ssh::Machine::reach(&remote.host, remote.port, &how_to_reach()).await?;
+        Ok(Self {
+            machine,
+            remote: remote.clone(),
+        })
+    }
+
+    /// Where the copy goes there, as [`destination`] has it for this
+    /// machine: into the path if that is a folder or is written as one,
+    /// under the name the source has. And otherwise at the path itself,
+    /// whose last part is then the name the copy is given.
+    async fn destination(&self) -> anyhow::Result<(String, Option<String>)> {
+        let path = self.remote.path.as_str();
+        let written_as_folder = path.is_empty() || path.ends_with('/');
+        if written_as_folder || self.machine.is_folder(path).await? == Some(true) {
+            return Ok((path.to_owned(), None));
+        }
+        let (folder, name) = match path.rsplit_once('/') {
+            Some(("", name)) => ("/", name),
+            Some((folder, name)) => (folder, name),
+            None => ("", path),
+        };
+        Ok((folder.to_owned(), Some(name.to_owned())))
+    }
+
+    /// The folder `dir` there, as it is written before the name of what is
+    /// put in it.
+    fn before(&self, dir: &str) -> String {
+        let folder = mux::Remote {
+            path: dir.to_owned(),
+            ..self.remote.clone()
+        };
+        let written = folder.to_string();
+        if dir.is_empty() || dir.ends_with('/') {
+            written
+        } else {
+            format!("{written}/")
+        }
+    }
+}
+
+/// The chunks that are on their way to a machine reached by SSH at one
+/// time, from a source that gives them one request at a time. Each small
+/// file takes three exchanges with the other machine, and it is by having
+/// many of them in the air together that a tree of small files is quick.
+/// The place itself keeps large chunks from all being in memory at once.
+#[cfg(feature = "ssh")]
+const AT_ONCE_THERE: usize = 128;
+
+/// How `ssh` is run: as it is, or as `MUX_SSH` says, which is to mux what
+/// `GIT_SSH` is to git.
+#[cfg(feature = "ssh")]
+fn how_to_reach() -> mux::ssh::Options {
+    let mut how = mux::ssh::Options::default();
+    if let Some(program) = std::env::var_os("MUX_SSH").filter(|program| !program.is_empty()) {
+        how.program = program;
+    }
+    how
 }
 
 impl Copy<'_> {
@@ -486,7 +582,7 @@ impl Copy<'_> {
             self.plan(&sources).await?;
             Ok(None)
         } else {
-            self.copy(sources).await.map(Some)
+            self.copy(sources).await
         }
     }
 
@@ -595,6 +691,23 @@ impl Copy<'_> {
 
     /// Says what the copy would do, and does none of it.
     async fn plan(&self, sources: &[Arc<dyn Source>]) -> anyhow::Result<()> {
+        #[cfg(feature = "ssh")]
+        if let Some(there) = self.there {
+            let (dir, name) = there.destination().await?;
+            let planned = engine::plan(sources, name, DEFAULT_CHUNK_SIZE).await?;
+            let tree = &planned.tree;
+            let place = mux::ssh::RemoteFolder::inside(&there.machine, tree.clone(), &dir);
+            let is_there = planned.is_in(&Arc::new(place)).await?;
+            let checked = checked((!is_there).then(|| planned.verification()));
+            let path = format!("{}{}", there.before(&dir), tree.name());
+            self.say_plan(
+                Path::new(&path),
+                tree.total_size(),
+                planned.files(),
+                checked,
+            );
+            return Ok(());
+        }
         let (folder, name) = destination(self.to);
         let planned = engine::plan(sources, name, DEFAULT_CHUNK_SIZE).await?;
         let tree = &planned.tree;
@@ -607,15 +720,53 @@ impl Copy<'_> {
     }
 
     /// Copies what `sources` hold, says what was done, and gives the path
-    /// that was written.
-    async fn copy(&self, sources: Vec<Arc<dyn Source>>) -> anyhow::Result<PathBuf> {
-        let (folder, name) = destination(self.to);
+    /// that was written, if it is on this machine.
+    async fn copy(&self, sources: Vec<Arc<dyn Source>>) -> anyhow::Result<Option<PathBuf>> {
         let limits = engine::Options {
             requests_per_supplier: self.args.streams.max(1),
             stall_timeout: Duration::from_secs(self.args.stall_timeout),
             ..engine::Options::default()
         };
         let started = Instant::now();
+        #[cfg(feature = "ssh")]
+        if let Some(there) = self.there {
+            // Every request to the other machine is a packet of one
+            // connection, and many can be on their way at once: for small
+            // files that is what the time goes on, not the bytes.
+            let limits = engine::Options {
+                requests_per_supplier: limits.requests_per_supplier.max(AT_ONCE_THERE),
+                ..limits
+            };
+            let (dir, name) = there.destination().await?;
+            let before = there.before(&dir);
+            let showing = Shown::there(self.json, self.from, self.to, &before);
+            let made = OnceLock::new();
+            let copied = engine::copy(
+                sources,
+                name,
+                DEFAULT_CHUNK_SIZE,
+                |tree| {
+                    showing.copying(tree);
+                    let place = mux::ssh::RemoteFolder::inside(&there.machine, tree.clone(), &dir);
+                    made.get_or_init(|| Arc::new(place)).clone()
+                },
+                limits,
+                showing.observer(),
+            )
+            .await;
+            showing.done();
+            let copied = copied?;
+            let left_out = made.get().map_or(0, |place| place.skipped_links());
+            if left_out > 0 {
+                eprintln!(
+                    "note: left out {} that the other machine's server cannot put in place",
+                    ui::plural(left_out, "link")
+                );
+            }
+            self.say_done(&format!("{before}{}", copied.tree.name()), &copied, started);
+            return Ok(None);
+        }
+        let (folder, name) = destination(self.to);
         let showing = Shown::new(self.json, self.from, self.to, &folder);
         let copied = engine::copy(
             sources,
@@ -631,27 +782,28 @@ impl Copy<'_> {
         .await;
         showing.done();
         let copied = copied?;
-
         let saved = folder.join(copied.tree.name());
+        self.say_done(&saved.to_string_lossy(), &copied, started);
+        Ok(Some(saved))
+    }
+
+    /// Says what a copy that is finished did. `saved` is where it is.
+    fn say_done(&self, saved: &str, copied: &engine::Copied, started: Instant) {
         let checked = checked(copied.verification);
         let bytes = copied.tree.total_size();
         if self.json {
             tell::say(&Line::Done {
-                path: &saved.to_string_lossy(),
+                path: saved,
                 bytes,
                 checked,
                 fetched: copied.fetched,
                 kept: copied.resumed,
             });
-            return Ok(saved);
+            return;
         }
         // What was written is the only thing on standard output.
-        println!("{}\t{bytes}\t{checked}", saved.display());
-        eprintln!(
-            "saved    {}  ({}, {checked})",
-            saved.display(),
-            ui::bytes(bytes)
-        );
+        println!("{saved}\t{bytes}\t{checked}");
+        eprintln!("saved    {saved}  ({}, {checked})", ui::bytes(bytes));
         if copied.fetched > 0 {
             let elapsed = started.elapsed();
             eprintln!(
@@ -667,7 +819,6 @@ impl Copy<'_> {
                 ui::bytes(copied.resumed)
             );
         }
-        Ok(saved)
     }
 }
 
@@ -707,6 +858,9 @@ pub(super) struct Lines {
     destination: String,
     /// The folder the copy goes into.
     folder: PathBuf,
+    /// For a copy to another machine: that folder there, as it is written
+    /// before the name of what is put in it.
+    there: Option<String>,
     /// The tree being copied, once it is known.
     tree: OnceLock<Arc<Tree>>,
     progress: Mutex<Progress>,
@@ -730,6 +884,7 @@ impl Shown {
             source: from.to_owned(),
             destination: to.to_owned(),
             folder: folder.to_owned(),
+            there: None,
             tree: OnceLock::new(),
             progress: Mutex::new(Progress {
                 bytes: 0,
@@ -737,6 +892,29 @@ impl Shown {
                 said: Instant::now(),
             }),
         }))
+    }
+
+    /// The same for a copy to another machine, where `before` is what the
+    /// folder it goes into is written as, before the name of what is put
+    /// in it.
+    #[cfg(feature = "ssh")]
+    pub(super) fn there(json: bool, from: &str, to: &str, before: &str) -> Self {
+        let shown = Self::new(json, from, to, Path::new(""));
+        match shown {
+            Self::Lines(lines) => Self::Lines(Arc::new(Lines {
+                source: lines.source.clone(),
+                destination: lines.destination.clone(),
+                folder: PathBuf::new(),
+                there: Some(before.to_owned()),
+                tree: OnceLock::new(),
+                progress: Mutex::new(Progress {
+                    bytes: 0,
+                    of: 0,
+                    said: Instant::now(),
+                }),
+            })),
+            bar @ Self::Bar(_) => bar,
+        }
     }
 
     /// Notes the tree that is being copied, to name its files by.
@@ -785,6 +963,16 @@ impl Lines {
                 let Some(entry) = tree.entries().get(file) else {
                     return;
                 };
+                // On another machine a path is written with `/`, whatever
+                // this one writes its own with.
+                if let Some(before) = &self.there {
+                    let parts = [tree.name(), entry.path.as_str()];
+                    let parts: Vec<&str> = parts.into_iter().filter(|p| !p.is_empty()).collect();
+                    tell::say(&Line::File {
+                        path: &format!("{before}{}", parts.join("/")),
+                    });
+                    return;
+                }
                 let mut path = self.folder.join(tree.name());
                 path.extend(entry.path.split('/').filter(|part| !part.is_empty()));
                 tell::say(&Line::File {

@@ -527,6 +527,15 @@ impl Learned {
                 continue;
             }
             let chunks = tree.file_chunks(file);
+            // A file of one chunk is whole the moment that chunk is
+            // written: there is never a part of it to carry on from, and
+            // so nothing to note. For a tree of small files that is one
+            // write for each file, where notes made it three.
+            if chunks.end - chunks.start <= 1 {
+                sink.abort(file)?;
+                described.push((known, None));
+                continue;
+            }
             // The notes of this file and no more, whatever is there.
             let limit = Notes::longest(size, tree.chunk_size());
             let earlier = Notes::read(&sink.notes(file, limit)?)

@@ -80,23 +80,7 @@ impl Remote {
         path: &str,
         options: &Options,
     ) -> Result<Self, Failure> {
-        let mut program = Command::new(&options.program);
-        // What OpenSSH's own `sftp` passes: nothing but this conversation
-        // goes over the connection, and no terminal is asked for.
-        program.args([
-            "-x",
-            "-oForwardAgent=no",
-            "-oPermitLocalCommand=no",
-            "-oClearAllForwardings=yes",
-            "-oRemoteCommand=none",
-            "-oRequestTTY=no",
-        ]);
-        if let Some(port) = port {
-            program.arg("-p").arg(port.to_string());
-        }
-        // After `--` nothing is read as an option, whatever the host is.
-        program.args(["-s", "--", host, "sftp"]);
-        let session = Session::run(program, host).await?;
+        let session = reach(host, port, options).await?;
         Self::over(session, host, path).await
     }
 
@@ -200,6 +184,31 @@ impl Remote {
             .map_or("", |found| found.path.as_str());
         format!("{}:{path}", self.0.host)
     }
+}
+
+/// Begins a conversation with `host`, by the system's `ssh`.
+pub(crate) async fn reach(
+    host: &str,
+    port: Option<u16>,
+    options: &Options,
+) -> Result<Arc<Session>, Failure> {
+    let mut program = Command::new(&options.program);
+    // What OpenSSH's own `sftp` passes: nothing but this conversation
+    // goes over the connection, and no terminal is asked for.
+    program.args([
+        "-x",
+        "-oForwardAgent=no",
+        "-oPermitLocalCommand=no",
+        "-oClearAllForwardings=yes",
+        "-oRemoteCommand=none",
+        "-oRequestTTY=no",
+    ]);
+    if let Some(port) = port {
+        program.arg("-p").arg(port.to_string());
+    }
+    // After `--` nothing is read as an option, whatever the host is.
+    program.args(["-s", "--", host, "sftp"]);
+    Session::run(program, host).await
 }
 
 /// What is recorded of an entry, as a manifest records it.

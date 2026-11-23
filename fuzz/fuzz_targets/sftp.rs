@@ -5,9 +5,12 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use ssh::wire::{Reply, decode};
+use ssh::wire::{Reply, decode, greeting};
 
 fuzz_target!(|data: &[u8]| {
+    // The first packet of a server is read by itself, and names the
+    // requests of its own that it has: as many as it likes.
+    let _ = greeting(data);
     let Ok((_, reply)) = decode(data) else {
         return;
     };

@@ -581,3 +581,44 @@ async fn the_servers_own_sftp_server_passes_the_checks() {
     let read = remote.unwrap().read(0, 0, 1_500_000).await.unwrap();
     assert!(read == bytes);
 }
+
+/// The system's `sftp-server`, to put things on: this machine, reached as
+/// another would be. `None` where there is no such server.
+async fn this_machine() -> Option<crate::Machine> {
+    let server = SERVERS.iter().find(|path| Path::new(path).exists());
+    #[cfg(target_os = "macos")]
+    let server = Some(server.expect("macOS has an sftp-server"));
+    let Some(server) = server else {
+        eprintln!("no sftp-server on this system: not checked against a real one");
+        return None;
+    };
+    let session = Session::run(tokio::process::Command::new(server), "this machine").await;
+    Some(crate::Machine::over(session.unwrap(), "this machine"))
+}
+
+/// A folder on a machine reached by SSH does what every place must. The
+/// checks call it as the engine does, and also from the test's own thread,
+/// which is one of the runtime's: so the runtime has more than one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_on_another_machine_is_a_place() {
+    let Some(machine) = this_machine().await else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let checked = engine::conformance::check(|tree, name| {
+        let dir = base.join(name);
+        let folder = crate::RemoteFolder::inside(&machine, tree.clone(), dir.to_str().unwrap());
+        Arc::new(folder)
+    });
+    assert_eq!(checked.await, Ok(()));
+    // Nothing is left under a part name once every check has finished or
+    // thrown away what it began, but for the one file the checks leave
+    // unfinished on purpose.
+    assert_eq!(
+        machine.is_folder(base.to_str().unwrap()).await,
+        Ok(Some(true))
+    );
+    let nothing = base.join("is not there");
+    assert_eq!(machine.is_folder(nothing.to_str().unwrap()).await, Ok(None));
+}

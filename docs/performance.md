@@ -392,6 +392,33 @@ turns:
 the same `ssh` as the others. On small files mux is now level with
 `rsync`, and forty times as fast as `rclone` as it comes.
 
+**The other way**, to the Linux machine (`mux cp folder host:path`,
+[#140](https://github.com/yuvichh/mux/issues/140)). The laptop's link
+carried 15 to 20 MiB/s upward that day. Four rounds of the small files and
+two of a file of 256 MiB:
+
+| | One file of 256 MiB | 3,000 files of 16 KiB (47 MiB) |
+| --- | ---: | ---: |
+| `mux cp` | 16.3 to 17.8 s | 3.4 to 4.4 s |
+| `rsync -a` | 15.6 to 17.1 s | 2.5 to 3.3 s |
+| `scp` | 14.8 to 18.0 s | 105 s, once |
+
+- A large file goes as fast as the link carries it, with each of them.
+- Small files take mux a third longer than `rsync`, and `scp` thirty times
+  as long as mux. Each small file is three exchanges with the other machine
+  (make it, write it, name it), and a round trip was 5.6 ms. What makes
+  that quick is having 128 files on their way at once.
+- How it got there, on the same 3,000 files: 10.0 s as first written;
+  4.5 to 5.8 s with no notes kept for a file of one chunk, which had been
+  two more exchanges for each file before the first byte of it, and 32
+  files at once; 3.4 to 4.4 s with 128. The exchange that names a file
+  could still be left unwaited for, and is the next thing to try.
+- **A flush for each file on the other machine** (`fsync@openssh.com`) was
+  tried and is not done: the small files took 5.1 to 26.2 s with it where
+  they took 3.3 to 6.5 s without in the same three rounds, and the large
+  file 18.6 to 42.4 s where it took 16.6 to 19.7 s. `scp`, `rsync` and
+  `sftp` do not flush either.
+
 The tools that need no SSH are in [Next to croc and sendme](#next-to-croc-and-sendme).
 
 ## Small files and the flush

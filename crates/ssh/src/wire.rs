@@ -42,13 +42,21 @@ pub(crate) mod kind {
     pub(crate) const OPEN: u8 = 3;
     pub(crate) const CLOSE: u8 = 4;
     pub(crate) const READ: u8 = 5;
+    pub(crate) const WRITE: u8 = 6;
     pub(crate) const LSTAT: u8 = 7;
     pub(crate) const FSTAT: u8 = 8;
+    pub(crate) const SETSTAT: u8 = 9;
+    pub(crate) const FSETSTAT: u8 = 10;
     pub(crate) const OPENDIR: u8 = 11;
     pub(crate) const READDIR: u8 = 12;
+    pub(crate) const REMOVE: u8 = 13;
+    pub(crate) const MKDIR: u8 = 14;
     pub(crate) const REALPATH: u8 = 16;
     pub(crate) const STAT: u8 = 17;
+    pub(crate) const RENAME: u8 = 18;
     pub(crate) const READLINK: u8 = 19;
+    pub(crate) const SYMLINK: u8 = 20;
+    pub(crate) const EXTENDED: u8 = 200;
     pub(crate) const STATUS: u8 = 101;
     pub(crate) const HANDLE: u8 = 102;
     pub(crate) const DATA: u8 = 103;
@@ -67,6 +75,25 @@ mod flag {
 
 /// Open a file to read it.
 const OPEN_TO_READ: u32 = 0x1;
+/// Open a file to read it and to write it, and make it if nothing is there.
+const OPEN_TO_WRITE: u32 = 0x1 | 0x2 | 0x8;
+
+/// The most bytes sent in one write. Every server takes this many in one
+/// packet.
+pub const WRITE_SIZE: usize = 32 * 1024;
+
+/// The permissions a file has while it is being written: its owner's alone.
+/// It is given those of the file it is a copy of when it is whole.
+const WHILE_WRITTEN: u32 = 0o600;
+
+/// The permissions a directory is made with. Those recorded for it are
+/// given it when everything is in it.
+const NEW_DIRECTORY: u32 = 0o755;
+
+/// The request, of OpenSSH's own, that gives a file another name and
+/// replaces whatever has that name in the same step. The request of the
+/// protocol refuses to replace anything.
+pub const REPLACE: &str = "posix-rename@openssh.com";
 
 /// Something asked of the other machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +127,59 @@ pub enum Request<'a> {
     Realpath(&'a [u8]),
     /// Say where the link at a path points.
     Readlink(&'a [u8]),
+    /// Open the file at a path, to write it and to read it back. It is made
+    /// if nothing is there, and what is there is kept.
+    Create(&'a [u8]),
+    /// Write bytes into an open file.
+    Write {
+        /// The file, as [`Reply::Handle`] named it.
+        handle: &'a [u8],
+        /// Where in the file the bytes go.
+        offset: u64,
+        /// The bytes: no more than [`WRITE_SIZE`] of them.
+        data: &'a [u8],
+    },
+    /// Change what is recorded of an open file: each thing that is given.
+    Fsetstat {
+        /// The file.
+        handle: &'a [u8],
+        /// What it is to have.
+        attrs: Attrs,
+    },
+    /// Change what is recorded of what is at a path.
+    Setstat {
+        /// The path.
+        path: &'a [u8],
+        /// What it is to have.
+        attrs: Attrs,
+    },
+    /// Make a directory at a path.
+    Mkdir(&'a [u8]),
+    /// Remove the file at a path.
+    Remove(&'a [u8]),
+    /// Give what is at one path another. Refused if something is there.
+    Rename {
+        /// The path it has.
+        from: &'a [u8],
+        /// The path it is to have.
+        to: &'a [u8],
+    },
+    /// Give what is at one path another, and replace whatever is there in
+    /// the same step: [`REPLACE`], which not every server has.
+    Replace {
+        /// The path it has.
+        from: &'a [u8],
+        /// The path it is to have.
+        to: &'a [u8],
+    },
+    /// Make a link. The two paths are in the order OpenSSH reads them in,
+    /// which is not the order the protocol was written with.
+    Symlink {
+        /// Where the link points.
+        target: &'a [u8],
+        /// The path of the link.
+        link: &'a [u8],
+    },
 }
 
 impl Request<'_> {
@@ -107,37 +187,98 @@ impl Request<'_> {
     /// back with the answer. [`Request::Init`] carries none.
     pub fn encode(&self, id: u32) -> Vec<u8> {
         let mut packet = vec![0; 4];
-        let (kind, text) = match *self {
+        let kind = match self {
             Self::Init => {
                 packet.push(kind::INIT);
                 packet.extend(VERSION.to_be_bytes());
                 return framed(packet);
             }
-            Self::Open(path) => (kind::OPEN, path),
-            Self::Close(handle) => (kind::CLOSE, handle),
-            Self::Read { handle, .. } => (kind::READ, handle),
-            Self::Lstat(path) => (kind::LSTAT, path),
-            Self::Stat(path) => (kind::STAT, path),
-            Self::Fstat(handle) => (kind::FSTAT, handle),
-            Self::Opendir(path) => (kind::OPENDIR, path),
-            Self::Readdir(handle) => (kind::READDIR, handle),
-            Self::Realpath(path) => (kind::REALPATH, path),
-            Self::Readlink(path) => (kind::READLINK, path),
+            Self::Open(_) | Self::Create(_) => kind::OPEN,
+            Self::Close(_) => kind::CLOSE,
+            Self::Read { .. } => kind::READ,
+            Self::Write { .. } => kind::WRITE,
+            Self::Lstat(_) => kind::LSTAT,
+            Self::Stat(_) => kind::STAT,
+            Self::Fstat(_) => kind::FSTAT,
+            Self::Setstat { .. } => kind::SETSTAT,
+            Self::Fsetstat { .. } => kind::FSETSTAT,
+            Self::Opendir(_) => kind::OPENDIR,
+            Self::Readdir(_) => kind::READDIR,
+            Self::Remove(_) => kind::REMOVE,
+            Self::Mkdir(_) => kind::MKDIR,
+            Self::Realpath(_) => kind::REALPATH,
+            Self::Rename { .. } => kind::RENAME,
+            Self::Readlink(_) => kind::READLINK,
+            Self::Symlink { .. } => kind::SYMLINK,
+            Self::Replace { .. } => kind::EXTENDED,
         };
         packet.push(kind);
         packet.extend(id.to_be_bytes());
-        put_bytes(&mut packet, text);
         match *self {
-            Self::Open(_) => {
+            Self::Init => {}
+            Self::Close(text)
+            | Self::Lstat(text)
+            | Self::Stat(text)
+            | Self::Fstat(text)
+            | Self::Opendir(text)
+            | Self::Readdir(text)
+            | Self::Realpath(text)
+            | Self::Readlink(text)
+            | Self::Remove(text) => put_bytes(&mut packet, text),
+            Self::Open(path) => {
+                put_bytes(&mut packet, path);
                 packet.extend(OPEN_TO_READ.to_be_bytes());
                 // No attributes: nothing is made.
                 packet.extend(0u32.to_be_bytes());
             }
-            Self::Read { offset, len, .. } => {
+            Self::Create(path) => {
+                put_bytes(&mut packet, path);
+                packet.extend(OPEN_TO_WRITE.to_be_bytes());
+                put_attrs(&mut packet, &Attrs::of_mode(WHILE_WRITTEN));
+            }
+            Self::Read {
+                handle,
+                offset,
+                len,
+            } => {
+                put_bytes(&mut packet, handle);
                 packet.extend(offset.to_be_bytes());
                 packet.extend(len.to_be_bytes());
             }
-            _ => {}
+            Self::Write {
+                handle,
+                offset,
+                data,
+            } => {
+                put_bytes(&mut packet, handle);
+                packet.extend(offset.to_be_bytes());
+                put_bytes(&mut packet, data);
+            }
+            Self::Fsetstat {
+                handle: text,
+                attrs,
+            }
+            | Self::Setstat { path: text, attrs } => {
+                put_bytes(&mut packet, text);
+                put_attrs(&mut packet, &attrs);
+            }
+            Self::Mkdir(path) => {
+                put_bytes(&mut packet, path);
+                put_attrs(&mut packet, &Attrs::of_mode(NEW_DIRECTORY));
+            }
+            Self::Rename { from, to } => {
+                put_bytes(&mut packet, from);
+                put_bytes(&mut packet, to);
+            }
+            Self::Replace { from, to } => {
+                put_bytes(&mut packet, REPLACE.as_bytes());
+                put_bytes(&mut packet, from);
+                put_bytes(&mut packet, to);
+            }
+            Self::Symlink { target, link } => {
+                put_bytes(&mut packet, target);
+                put_bytes(&mut packet, link);
+            }
         }
         framed(packet)
     }
@@ -153,6 +294,28 @@ fn framed(mut packet: Vec<u8>) -> Vec<u8> {
 fn put_bytes(packet: &mut Vec<u8>, bytes: &[u8]) {
     packet.extend(u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_be_bytes());
     packet.extend(bytes);
+}
+
+/// Writes the attributes that are given, and says which they are. One
+/// time is all a set of attributes holds here: it is written both as when
+/// the thing was last read and as when it was last changed, since the
+/// protocol has no way to give one without the other.
+fn put_attrs(packet: &mut Vec<u8>, attrs: &Attrs) {
+    let has = |there: bool, bit: u32| if there { bit } else { 0 };
+    let flags = has(attrs.size.is_some(), flag::SIZE)
+        | has(attrs.mode.is_some(), flag::PERMISSIONS)
+        | has(attrs.modified.is_some(), flag::TIMES);
+    packet.extend(flags.to_be_bytes());
+    if let Some(size) = attrs.size {
+        packet.extend(size.to_be_bytes());
+    }
+    if let Some(mode) = attrs.mode {
+        packet.extend(mode.to_be_bytes());
+    }
+    if let Some(modified) = attrs.modified {
+        packet.extend(modified.to_be_bytes());
+        packet.extend(modified.to_be_bytes());
+    }
 }
 
 /// What is recorded about a file, a directory or a link. A server leaves
@@ -182,6 +345,14 @@ pub enum Kind {
 }
 
 impl Attrs {
+    /// Permission bits, and nothing else.
+    pub fn of_mode(mode: u32) -> Self {
+        Self {
+            mode: Some(mode),
+            ..Self::default()
+        }
+    }
+
     /// The kind of thing these are the attributes of.
     pub fn kind(&self) -> Kind {
         match self.mode.map(|mode| mode & KIND) {
@@ -228,6 +399,39 @@ pub enum Reply {
 /// A packet that is not one of this protocol's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Malformed(pub &'static str);
+
+/// What the other machine says of itself in its first packet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Greeting {
+    /// The version of the protocol it speaks.
+    pub version: u32,
+    /// Whether it has [`REPLACE`].
+    pub replaces: bool,
+}
+
+/// Reads the other machine's first packet: everything after its length.
+///
+/// # Errors
+///
+/// Returns [`Malformed`] if it is not that packet, or is cut short.
+pub fn greeting(packet: &[u8]) -> Result<Greeting, Malformed> {
+    let mut rest = Bytes(packet);
+    if rest.byte()? != kind::VERSION {
+        return Err(Malformed("a first packet that is not a greeting"));
+    }
+    let mut greeting = Greeting {
+        version: rest.u32()?,
+        ..Greeting::default()
+    };
+    // Each request of its own that the server has: its name, and a
+    // version of it.
+    while !rest.is_empty() {
+        let name = rest.bytes()?;
+        rest.bytes()?;
+        greeting.replaces |= name == REPLACE.as_bytes();
+    }
+    Ok(greeting)
+}
 
 /// Reads a packet from the other machine: everything after its length.
 /// Gives the request it answers, which [`Reply::Version`] has none of.
@@ -348,7 +552,7 @@ impl<'a> Bytes<'a> {
 /// needs it.
 #[cfg(test)]
 pub(crate) mod served {
-    use super::{Attrs, Bytes, Malformed, Named, Reply, flag, framed, kind, put_bytes};
+    use super::{Bytes, Malformed, Named, Reply, framed, kind, put_attrs, put_bytes};
 
     /// A request as a server reads it: its kind, the path or the handle it
     /// names, and for a read, where and how much.
@@ -431,24 +635,6 @@ pub(crate) mod served {
         }
         framed(packet)
     }
-
-    fn put_attrs(packet: &mut Vec<u8>, attrs: &Attrs) {
-        let has = |there: bool, bit: u32| if there { bit } else { 0 };
-        let flags = has(attrs.size.is_some(), flag::SIZE)
-            | has(attrs.mode.is_some(), flag::PERMISSIONS)
-            | has(attrs.modified.is_some(), flag::TIMES);
-        packet.extend(flags.to_be_bytes());
-        if let Some(size) = attrs.size {
-            packet.extend(size.to_be_bytes());
-        }
-        if let Some(mode) = attrs.mode {
-            packet.extend(mode.to_be_bytes());
-        }
-        if let Some(modified) = attrs.modified {
-            packet.extend(modified.to_be_bytes());
-            packet.extend(modified.to_be_bytes());
-        }
-    }
 }
 
 #[cfg(test)]
@@ -482,6 +668,147 @@ mod tests {
             proptest::collection::vec(named, 0..5).prop_map(Reply::Name),
             attrs().prop_map(Reply::Attrs),
         ]
+    }
+
+    /// A packet as it goes on the wire: its length, then its parts.
+    fn packet(parts: &[&[u8]]) -> Vec<u8> {
+        let body: Vec<u8> = parts.concat();
+        let mut packet = u32::try_from(body.len()).unwrap().to_be_bytes().to_vec();
+        packet.extend(body);
+        packet
+    }
+
+    /// Bytes with their length before them.
+    fn counted(bytes: &[u8]) -> Vec<u8> {
+        let mut counted = Vec::new();
+        put_bytes(&mut counted, bytes);
+        counted
+    }
+
+    #[test]
+    fn a_greeting_says_whether_a_server_can_replace_a_file_in_one_step() {
+        let mut said = vec![kind::VERSION];
+        said.extend(3u32.to_be_bytes());
+        let plain = Greeting {
+            version: 3,
+            replaces: false,
+        };
+        assert_eq!(greeting(&said), Ok(plain));
+
+        // Each request of its own is a name and a version of it.
+        for name in ["fsync@openssh.com", REPLACE, "statvfs@openssh.com"] {
+            put_bytes(&mut said, name.as_bytes());
+            put_bytes(&mut said, b"1");
+        }
+        let replaces = Greeting {
+            version: 3,
+            replaces: true,
+        };
+        assert_eq!(greeting(&said), Ok(replaces));
+
+        // Cut short, or not a greeting at all.
+        assert!(greeting(&said[..said.len() - 1]).is_err());
+        assert!(greeting(&[kind::STATUS, 0, 0, 0, 0]).is_err());
+        assert!(greeting(&[]).is_err());
+    }
+
+    /// The requests that write, byte for byte as the protocol has them.
+    #[test]
+    fn the_requests_that_write_are_packets_a_server_reads() {
+        let id = 7u32.to_be_bytes();
+        let written = Request::Write {
+            handle: b"h1",
+            offset: 258,
+            data: b"abc",
+        };
+        let expected = packet(&[
+            &[kind::WRITE],
+            &id,
+            &counted(b"h1"),
+            &258u64.to_be_bytes(),
+            &counted(b"abc"),
+        ]);
+        assert_eq!(written.encode(7), expected);
+
+        // To read and to write, made if it is not there, and its owner's
+        // alone while it is written.
+        let expected = packet(&[
+            &[kind::OPEN],
+            &id,
+            &counted(b"a/b.mux-part"),
+            &0x0bu32.to_be_bytes(),
+            &flag::PERMISSIONS.to_be_bytes(),
+            &0o600u32.to_be_bytes(),
+        ]);
+        assert_eq!(Request::Create(b"a/b.mux-part").encode(7), expected);
+
+        // A size, permissions and a time: the time goes twice, as when the
+        // file was last read and as when it was last changed.
+        let attrs = Attrs {
+            size: Some(5),
+            mode: Some(0o644),
+            modified: Some(1_700_000_000),
+        };
+        let all = flag::SIZE | flag::PERMISSIONS | flag::TIMES;
+        let time = 1_700_000_000u32.to_be_bytes();
+        let expected = packet(&[
+            &[kind::FSETSTAT],
+            &id,
+            &counted(b"h1"),
+            &all.to_be_bytes(),
+            &5u64.to_be_bytes(),
+            &0o644u32.to_be_bytes(),
+            &time,
+            &time,
+        ]);
+        let set = Request::Fsetstat {
+            handle: b"h1",
+            attrs,
+        };
+        assert_eq!(set.encode(7), expected);
+        let by_path = Request::Setstat { path: b"h1", attrs };
+        assert_eq!(by_path.encode(7)[4], kind::SETSTAT);
+        assert_eq!(by_path.encode(7)[5..], expected[5..]);
+
+        let expected = packet(&[
+            &[kind::MKDIR],
+            &id,
+            &counted(b"a"),
+            &flag::PERMISSIONS.to_be_bytes(),
+            &0o755u32.to_be_bytes(),
+        ]);
+        assert_eq!(Request::Mkdir(b"a").encode(7), expected);
+        assert_eq!(
+            Request::Remove(b"a").encode(7),
+            packet(&[&[kind::REMOVE], &id, &counted(b"a")])
+        );
+
+        // The rename of the protocol, and the one that replaces, which is
+        // a request of OpenSSH's own and goes under its name.
+        let (from, to) = (&b"a.mux-part"[..], &b"a"[..]);
+        let both = [counted(from), counted(to)].concat();
+        assert_eq!(
+            Request::Rename { from, to }.encode(7),
+            packet(&[&[kind::RENAME], &id, &both])
+        );
+        assert_eq!(
+            Request::Replace { from, to }.encode(7),
+            packet(&[&[kind::EXTENDED], &id, &counted(REPLACE.as_bytes()), &both])
+        );
+
+        // Where the link points first, and then the link: the order
+        // OpenSSH reads them in.
+        let link = Request::Symlink {
+            target: b"big.bin",
+            link: b"latest.mux-part",
+        };
+        let expected = packet(&[
+            &[kind::SYMLINK],
+            &id,
+            &counted(b"big.bin"),
+            &counted(b"latest.mux-part"),
+        ]);
+        assert_eq!(link.encode(7), expected);
     }
 
     proptest! {
