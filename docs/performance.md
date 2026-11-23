@@ -334,6 +334,48 @@ seconds, and the checksums were equal. `ssh` moves the same 20 MiB over
 the same link in 21.3 seconds. That link carries 10 Mbit/s, which is what
 the seeder's network card had agreed with its switch.
 
+## Next to scp, rsync and sftp
+
+mux is meant to take the place of `scp`, `rsync` and `curl`, so it is timed
+next to them. This is a copy **from a machine reached by SSH**
+(`mux cp host:path folder/`, [#131](https://github.com/yuvichh/mux/issues/131)),
+over SFTP on one SSH connection, with nothing of mux on the other machine.
+
+A laptop (macOS 26, Apple silicon) copied from a Linux machine on the same
+home network, three times with each tool, the tools taking turns. The link
+carries about 17 MiB/s. Both ends have OpenSSH 10.5. The other machine has
+rsync 3.5, and the laptop the `openrsync` that macOS ships.
+
+| | One file of 512 MiB | 3,000 files of 16 KiB (47 MiB) |
+| --- | ---: | ---: |
+| `mux cp` | 16.9 to 17.3 MiB/s | 9.4 to 11.2 s |
+| `scp -r` | 15.6 to 21.4 MiB/s | 104 to 134 s |
+| `sftp -r` | 16.1 to 17.8 MiB/s | 107 to 141 s |
+| `rsync -a` | 16.2 to 19.2 MiB/s | 2.2 to 4.1 s |
+
+- **A large file** goes as fast as the link carries it, with every tool.
+- **Many small files** are where the tools differ. `scp` and `sftp` take
+  each file in turn and wait for each answer: 35 to 47 milliseconds a file.
+  mux has many files in flight on the one connection, and is ten times as
+  fast as they are. `rsync` sends everything as one stream, and is three
+  to four times as fast as mux.
+- **What holds mux back there is not the network.** The same 3,000 files
+  copied from one folder to another on the laptop take 11.0 to 11.7 s,
+  where `cp -R` takes 1.0 s. mux flushes each file to the disk before it
+  gives the file its name, so that a named file is whole after a power
+  cut, and on macOS that flush is three to four milliseconds. With the
+  flush taken out as an experiment, the folder-to-folder copy takes 0.6 to
+  1.5 s and the copy over SSH 3.5 to 3.9 s, level with `rsync`. Paying for
+  the flush once for many files and not once for each is
+  [#132](https://github.com/yuvichh/mux/issues/132).
+- A copy of the 512 MiB file that was killed after nine seconds and run
+  again kept the 140 MiB it had and fetched the rest. `scp` starts again.
+  A second run of a finished copy of the 3,000 files reads nothing and
+  takes 0.3 s.
+
+Not yet in this table: `rclone`, and the tools that need no SSH (`croc`,
+`sendme`, `magic-wormhole`), which are to be timed against a ticket.
+
 ## Web downloads
 
 `just fetch URL` fetches one web address into a folder, three times, and

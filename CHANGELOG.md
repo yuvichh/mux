@@ -32,6 +32,12 @@ first. Each line names the pull request that made the change.
   every ticket did before (#126).
 - `mux probe` says whether a ticket is a swarm's (#126).
 
+- **Copy from a machine you can `ssh` to**, written as `scp` writes it:
+  `mux cp server:/srv/site ./`. Nothing is installed on the other machine
+  and nothing is set up: mux runs the system's `ssh`. A copy carries on
+  after a break, skips what is already there, and `mux sync` and
+  `mux probe` take the same places. A folder of small files arrives about
+  ten times as fast as with `scp` (#134).
 - **Install in one line** on macOS and Linux:
   `curl -fsSL https://raw.githubusercontent.com/yuvichh/mux/main/install.sh | sh`.
   It takes the build for the machine, checks it against the release's

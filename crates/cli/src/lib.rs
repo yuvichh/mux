@@ -12,9 +12,11 @@ pub mod sync;
 
 pub use ::engine;
 pub use ::fs as store;
+#[cfg(feature = "ssh")]
+pub use ::ssh;
 #[cfg(feature = "web")]
 pub use ::web;
-pub use model::location::{Location, Protocol};
+pub use model::location::{Location, Protocol, Remote};
 pub use model::{artifact, mirror, place};
 pub use peer::{Error, Result, net, swarm};
 
@@ -25,6 +27,8 @@ pub fn protocols() -> Vec<Protocol> {
     #[cfg(feature = "web")]
     all.extend(web::PROTOCOLS);
     all.extend(peer::PROTOCOLS);
+    #[cfg(feature = "ssh")]
+    all.extend(ssh::PROTOCOLS);
     all
 }
 

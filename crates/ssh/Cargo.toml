@@ -1,0 +1,22 @@
+[package]
+name = "ssh"
+description = "Machines reached by SSH for mux: a file or a folder on one as a place to read from"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+model.workspace = true
+# The child process is the system's `ssh`, and what is said to it goes
+# through its pipes.
+tokio = { workspace = true, features = ["process", "io-util"] }
+
+[dev-dependencies]
+engine = { workspace = true, features = ["conformance"] }
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

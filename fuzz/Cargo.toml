@@ -14,6 +14,7 @@ libfuzzer-sys = "0.4"
 model = { path = "../crates/model" }
 peer = { path = "../crates/peer", default-features = false }
 web = { path = "../crates/web" }
+ssh = { path = "../crates/ssh" }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 
 # This crate is its own workspace, because fuzzing needs a nightly compiler
@@ -65,6 +66,13 @@ bench = false
 [[bin]]
 name = "hints"
 path = "fuzz_targets/hints.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sftp"
+path = "fuzz_targets/sftp.rs"
 test = false
 doc = false
 bench = false
