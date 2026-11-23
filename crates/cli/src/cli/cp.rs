@@ -65,6 +65,11 @@ pub(super) struct Args {
 
     #[command(flatten)]
     reach: Reach,
+
+    /// A node that is there already, to be used and not made again: the
+    /// one `mux get` asked what four words stand for.
+    #[arg(skip)]
+    node: Option<Arc<Node>>,
 }
 
 /// What `mux get` is told that `mux cp` is told too.
@@ -78,10 +83,16 @@ pub(super) struct Get {
 
 impl Args {
     /// What `mux get` means: what each of `sources` names, copied into
-    /// `folder`.
-    pub(super) fn get(mut sources: Vec<String>, folder: String, told: Get) -> Self {
+    /// `folder`. `node` is the one to fetch with, if there is one already.
+    pub(super) fn get(
+        mut sources: Vec<String>,
+        folder: String,
+        told: Get,
+        node: Option<Arc<Node>>,
+    ) -> Self {
         sources.push(folder);
         Self {
+            node,
             places: sources,
             hash: None,
             mirror: Vec::new(),
@@ -125,7 +136,7 @@ pub(super) async fn run(args: Args, json: bool, key: Option<&Path>) -> anyhow::R
     }
     // Made when the first ticket is met: a copy that has to do with no
     // other machine opens no socket.
-    let mut node: Option<Arc<Node>> = None;
+    let mut node: Option<Arc<Node>> = args.node.clone();
     let mut fetched: Vec<Report> = Vec::new();
     let mut saved: Vec<Saved> = Vec::new();
     let mut outcome = Ok(());
@@ -191,7 +202,7 @@ pub(super) async fn run(args: Args, json: bool, key: Option<&Path>) -> anyhow::R
         outcome = keep_offering(&node, &args, &passed_on, &saved, json).await;
     }
     if let Some(node) = node {
-        node.shutdown().await;
+        super::leave(&node).await;
     }
     outcome
 }

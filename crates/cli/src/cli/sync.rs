@@ -95,7 +95,7 @@ pub(super) async fn run(args: &Args, json: bool, key: Option<&Path>) -> anyhow::
             run_from(args, json, to, input).await
         }
         .await;
-        node.shutdown().await;
+        super::leave(&node).await;
         return result;
     }
     // The destination is what is made to match, not a folder to put a

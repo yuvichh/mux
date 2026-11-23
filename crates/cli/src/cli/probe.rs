@@ -106,7 +106,7 @@ async fn on_other_machines(
         Ok(found) => mux::swarm::holders(&node, found).await,
         Err(_) => Vec::new(),
     };
-    node.shutdown().await;
+    super::leave(&node).await;
     let mut found = found?;
     // Each web address is asked what it holds, as a copy would ask it.
     let origins = mux::origins::add(&mut found, ticket).await;

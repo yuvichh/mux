@@ -65,22 +65,29 @@ fn code(text: &str) -> Option<Code> {
 }
 
 pub(super) async fn run(args: Args, json: bool, key: Option<&Path>) -> anyhow::Result<()> {
-    let sources = match code(&args.what) {
+    let (sources, node) = match code(&args.what) {
         // The words stand for a ticket for each thing that is offered.
+        // The node that asked goes on to fetch: it has found the other
+        // machine, which is most of the time a small copy takes.
         Some(code) => {
             let node = super::node(key, &args.reach).await?;
-            let found = mux::swarm::tickets(&node, code, &args.at).await;
-            node.shutdown().await;
-            let tickets = found.context("cannot fetch with those words")?;
-            tickets.iter().map(ToString::to_string).collect()
+            let tickets = match mux::swarm::tickets(&node, code, &args.at).await {
+                Ok(tickets) => tickets,
+                Err(failed) => {
+                    super::leave(&node).await;
+                    return Err(failed).context("cannot fetch with those words");
+                }
+            };
+            let sources = tickets.iter().map(ToString::to_string).collect();
+            (sources, Some(node))
         }
         None => match mux::locate(&args.what)? {
             // A peer named beside a ticket is one more peer of the ticket.
             Location::Ticket(mut ticket) => {
                 ticket.peers.extend(args.peers);
-                vec![ticket.to_string()]
+                (vec![ticket.to_string()], None)
             }
-            _ => vec![args.what],
+            _ => (vec![args.what], None),
         },
     };
     let folder = args
@@ -96,7 +103,7 @@ pub(super) async fn run(args: Args, json: bool, key: Option<&Path>) -> anyhow::R
         reach: args.reach,
         sharing: args.sharing,
     };
-    cp::run(cp::Args::get(sources, folder, told), json, key).await
+    cp::run(cp::Args::get(sources, folder, told, node), json, key).await
 }
 
 #[cfg(test)]
