@@ -457,10 +457,14 @@ fn a_copy_that_finds_every_file_there_still_finishes_the_tree() {
     fs::remove_dir(copied.join("hollow")).unwrap();
     #[cfg(unix)]
     fs::remove_file(copied.join("nested/link")).unwrap();
-    let another = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
-    let nested = fs::File::open(copied.join("nested")).unwrap();
-    nested.set_modified(another).unwrap();
-    drop(nested);
+    // The time of a folder, where the system lets one be set: Windows
+    // does not let a folder be opened as a file is.
+    #[cfg(unix)]
+    {
+        let another = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        let nested = fs::File::open(copied.join("nested")).unwrap();
+        nested.set_modified(another).unwrap();
+    }
 
     let again = copy();
     assert_eq!((again.fetched, again.resumed), (0, 0));
