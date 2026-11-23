@@ -383,10 +383,9 @@ impl Sink for Memory {
     }
 
     fn keep(&self, file: usize) -> Result<(), Failure> {
-        self.waiting().retain(|&waits| waits != file);
+        // What an earlier try left beside it goes, as when it is aborted.
+        self.abort(file)?;
         self.slot(file, |slot| {
-            slot.pending = None;
-            slot.notes.clear();
             slot.kept = true;
             Ok(())
         })

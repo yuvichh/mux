@@ -423,6 +423,68 @@ fn a_copy_run_again_fetches_only_what_is_missing_or_changed() {
     assert!(third.verification.is_none());
 }
 
+/// A copy that finds every file there fetches nothing, and still puts
+/// right what is not a file: a folder that is missing, a link that is
+/// gone, and the time of a folder. That is what a copy leaves undone when
+/// it is stopped after its last file and before it has finished the tree.
+#[test]
+fn a_copy_that_finds_every_file_there_still_finishes_the_tree() {
+    use model::place::Source;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = sample_tree(tmp.path());
+    fs::create_dir(root.join("hollow")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("a.bin", root.join("nested/link")).unwrap();
+    let indexed = index(&root, MIN_CHUNK_SIZE, &|_| {}).unwrap();
+    let tree = indexed.artifact.tree().clone();
+    let source: Arc<dyn Source> = Arc::new(::fs::Folder::whole(tree, indexed.root));
+    let out = tmp.path().join("out");
+    let copy = || {
+        let open = |tree: &Arc<Tree>| Arc::new(::fs::Folder::inside(tree.clone(), &out));
+        let copying = engine::copy(
+            vec![source.clone()],
+            None,
+            MIN_CHUNK_SIZE,
+            open,
+            engine::Options::default(),
+            Arc::new(|_| {}),
+        );
+        crate::common::wait(copying).unwrap()
+    };
+    copy();
+
+    let copied = out.join("bundle");
+    fs::remove_dir(copied.join("hollow")).unwrap();
+    #[cfg(unix)]
+    fs::remove_file(copied.join("nested/link")).unwrap();
+    let another = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    let nested = fs::File::open(copied.join("nested")).unwrap();
+    nested.set_modified(another).unwrap();
+    drop(nested);
+
+    let again = copy();
+    assert_eq!((again.fetched, again.resumed), (0, 0));
+    assert!(again.verification.is_none());
+    assert!(copied.join("hollow").is_dir());
+    #[cfg(unix)]
+    {
+        let link = fs::read_link(copied.join("nested/link")).unwrap();
+        assert_eq!(link, std::path::Path::new("a.bin"));
+        // The time of a folder is kept where the system lets it be set.
+        for folder in ["", "nested", "nested/deep", "hollow"] {
+            let (ours, theirs) = (
+                fs::metadata(copied.join(folder)),
+                fs::metadata(root.join(folder)),
+            );
+            assert_eq!(
+                ours.unwrap().modified().ok(),
+                theirs.unwrap().modified().ok(),
+                "{folder:?}"
+            );
+        }
+    }
+}
+
 /// The sample tree as a folder to write into, with nothing in it yet, and
 /// the position of each file among its entries.
 fn opened(

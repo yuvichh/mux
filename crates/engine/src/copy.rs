@@ -171,6 +171,7 @@ where
     // cut off fetches what is missing, as one that never ran fetches all.
     let there = current(&tree, &place).await?;
     if all_of_them(&tree, &there) {
+        put_the_rest_right(&tree, &place).await?;
         observer(Event::Kept {
             bytes: tree.total_size(),
         });
@@ -289,6 +290,34 @@ async fn current<P: Sink + 'static>(
     looked.await.unwrap_or_else(|stopped| {
         Err(Failure::Fatal(format!(
             "looking at what is already there was cut short: {stopped}"
+        )))
+    })
+}
+
+/// Finishes a tree whose every file is in `place` already: its folders
+/// and links are made if they are not there, and its folders are given
+/// their times and permissions. No file is read or written.
+///
+/// A copy that is stopped after its last file has its name, and before the
+/// folders have their times, leaves a tree that only this puts right: the
+/// next copy finds every file there and fetches nothing.
+async fn put_the_rest_right<P: Sink + 'static>(
+    tree: &Arc<Tree>,
+    place: &Arc<P>,
+) -> Result<(), Failure> {
+    let (tree, place) = (tree.clone(), place.clone());
+    let finished = tokio::task::spawn_blocking(move || {
+        let entries = tree.entries().iter().enumerate();
+        for (file, _) in entries.filter(|(_, entry)| entry.is_file()) {
+            place.keep(file)?;
+        }
+        place.begin(&|_| None, &|_| {})?;
+        place.settle()?;
+        place.finish()
+    });
+    finished.await.unwrap_or_else(|stopped| {
+        Err(Failure::Fatal(format!(
+            "finishing what is already there was cut short: {stopped}"
         )))
     })
 }
