@@ -392,12 +392,13 @@ async fn a_copy_run_again_fetches_only_what_is_missing() {
     let again = mux(["cp", "--json", text(&source), &into]).await;
     assert!(again.status.success(), "{}", said(&again));
     let told = lines(&again);
-    let named: Vec<&str> = told
+    // As paths, which are the same however their parts are divided.
+    let named: Vec<PathBuf> = told
         .iter()
         .filter(|line| line["event"] == "file")
-        .map(|line| line["path"].as_str().unwrap())
+        .map(|line| PathBuf::from(line["path"].as_str().unwrap()))
         .collect();
-    assert_eq!(named, [text(&gone)]);
+    assert_eq!(named, [gone]);
     let done = told.last().unwrap();
     assert_eq!(
         (&done["fetched"], &done["kept"]),
