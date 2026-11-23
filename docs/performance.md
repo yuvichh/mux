@@ -530,8 +530,8 @@ The tools took turns.
 | `sendme` | 3.6 to 3.7 s | 2.5 to 3.0 s | 4.7 to 5.8 s | 12.9 to 21.0 s |
 | `croc` | 0.1 to 0.5 s | 6.1 to 8.3 s | 26.5 to 40.5 s | 142 to 229 s |
 
-Four runs of the small folder, three to five of the 3,000 files, six of
-the large file for mux and sendme and two for croc.
+Three or four runs of the small folder, three to five of the 3,000 files,
+six of the large file for mux and sendme and two for croc.
 
 - **A large file**: mux and sendme are level, and the link is the limit.
   It carried 25 MiB/s when the runs began and 40 MiB/s when they ended,
