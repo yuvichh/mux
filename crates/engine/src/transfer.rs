@@ -125,7 +125,7 @@ pub async fn transfer(
 ) -> Result<Summary, Error> {
     // A file that needed nothing fetched has its name already. It is told
     // of like one whose last chunk arrives, and before any of those.
-    for file in store.named_at_the_start() {
+    for file in store.newly_named() {
         observer(Event::Committed { file });
     }
     let (found, mut discovered) = mpsc::unbounded_channel();
@@ -228,6 +228,10 @@ pub async fn transfer(
     if let Some(failure) = run.failure() {
         return Err(failure.into());
     }
+    // Every file is whole. Those the place still holds back get their names
+    // now, so that each has been told of when the transfer ends.
+    run.store.settle().await?;
+    run.tell_of_named();
     Ok(Summary {
         sources: run.stored_from(),
         usable: slots
@@ -413,6 +417,14 @@ impl Run {
         Claims::reserve(&self.claims, owner, held, cursor, size, self.now())
     }
 
+    /// Tells of each file that has been given its final name and not been
+    /// told of yet.
+    fn tell_of_named(&self) {
+        for file in self.store.newly_named() {
+            (self.observer)(Event::Committed { file });
+        }
+    }
+
     /// Records a chunk that the store has verified and holds. One that
     /// was there already, because another supplier was asked for it as
     /// well and was first, is nobody's a second time: it is told of and
@@ -423,9 +435,9 @@ impl Run {
                 supplier: from,
                 bytes,
             });
-            if let Put::Completed(file) = put {
-                (self.observer)(Event::Committed { file });
-            }
+            // A file is told of when it has its name, which is as its
+            // last chunk arrives or a moment after, with others.
+            self.tell_of_named();
             *sync::lock(&self.stored_from).entry(from).or_default() += bytes;
             self.progressed();
         }

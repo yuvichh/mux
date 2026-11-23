@@ -192,6 +192,10 @@ One version was built, measured and dropped:
 | --- | --- |
 | Flush the directory after every rename | CPU for 2000 small files rose from 8.1 to 13.1 seconds per GiB, and throughput fell several times over. Directories are now flushed once, when the download completes. A power cut before that can undo a rename, and the next run finds the file whole under its part name and renames it again. |
 
+Since [#132](https://github.com/yuvichh/mux/issues/132) files are flushed
+together and not each by itself: see
+[Small files and the flush](#small-files-and-the-flush).
+
 `store_chunks` replaces `write_chunks`. The old benchmark measured a bare
 write of 7,701 instructions for 16 chunks. Storing a chunk now includes
 checking it against the manifest, which a download always did, one step
@@ -348,7 +352,7 @@ rsync 3.5, and the laptop the `openrsync` that macOS ships.
 
 | | One file of 512 MiB | 3,000 files of 16 KiB (47 MiB) |
 | --- | ---: | ---: |
-| `mux cp` | 16.9 to 17.3 MiB/s | 9.4 to 11.2 s |
+| `mux cp` | 16.9 to 17.3 MiB/s | 2.6 to 4.6 s (was 9.4 to 11.2 s) |
 | `scp -r` | 15.6 to 21.4 MiB/s | 104 to 134 s |
 | `sftp -r` | 16.1 to 17.8 MiB/s | 107 to 141 s |
 | `rsync -a` | 16.2 to 19.2 MiB/s | 2.2 to 4.1 s |
@@ -356,18 +360,16 @@ rsync 3.5, and the laptop the `openrsync` that macOS ships.
 - **A large file** goes as fast as the link carries it, with every tool.
 - **Many small files** are where the tools differ. `scp` and `sftp` take
   each file in turn and wait for each answer: 35 to 47 milliseconds a file.
-  mux has many files in flight on the one connection, and is ten times as
-  fast as they are. `rsync` sends everything as one stream, and is three
-  to four times as fast as mux.
-- **What holds mux back there is not the network.** The same 3,000 files
-  copied from one folder to another on the laptop take 11.0 to 11.7 s,
-  where `cp -R` takes 1.0 s. mux flushes each file to the disk before it
-  gives the file its name, so that a named file is whole after a power
-  cut, and on macOS that flush is three to four milliseconds. With the
-  flush taken out as an experiment, the folder-to-folder copy takes 0.6 to
-  1.5 s and the copy over SSH 3.5 to 3.9 s, level with `rsync`. Paying for
-  the flush once for many files and not once for each is
-  [#132](https://github.com/yuvichh/mux/issues/132).
+  mux has many files in flight on the one connection, and is thirty times
+  as fast as they are. `rsync` sends everything as one stream, and is a
+  little faster than mux: 2.0 to 3.6 s in the runs that gave mux 2.6 to
+  4.6 s.
+- **What held mux back there was not the network.** When the table was
+  first made mux took 9.4 to 11.2 s, three to four times as long as
+  `rsync`, and the same files copied from one folder to another on the
+  laptop took 11 s where `cp -R` takes under one. It was the flush that
+  makes a named file whole after a power cut, paid once for each file.
+  It is now paid once for many: see [the next part](#small-files-and-the-flush).
 - A copy of the 512 MiB file that was killed after nine seconds and run
   again kept the 140 MiB it had and fetched the rest. `scp` starts again.
   A second run of a finished copy of the 3,000 files reads nothing and
@@ -375,6 +377,82 @@ rsync 3.5, and the laptop the `openrsync` that macOS ships.
 
 Not yet in this table: `rclone`, and the tools that need no SSH (`croc`,
 `sendme`, `magic-wormhole`), which are to be timed against a ticket.
+
+## Small files and the flush
+
+mux gives a file its final name only when its bytes will last through a
+power cut. That takes a flush, and a flush costs the same for one file as
+for a thousand. It used to be done for each file
+([#132](https://github.com/yuvichh/mux/issues/132)). Now a file that is
+whole waits under its part name, and all that wait are flushed together and
+then named. [How it works](how-it-works.md) says what that is on each
+system and when it is done.
+
+What each way of flushing costs was timed first, by a program that does
+nothing else: it writes 3,000 files of 16 KiB under part names, makes them
+last, and renames them. Three runs each, the ways taking turns.
+
+| For each file | Once for all | macOS, APFS | Linux, btrfs |
+| --- | --- | ---: | ---: |
+| nothing | nothing | 0.26 to 0.31 s | 0.09 to 0.12 s |
+| `F_FULLFSYNC` on macOS, `fsync` on Linux: what mux did | nothing | 11.9 to 12.5 s | 2.6 to 6.7 s |
+| `fsync` | one `F_FULLFSYNC` | 0.32 s | |
+| `fsync` | one `F_FULLFSYNC` for each 256 files | 0.34 to 0.36 s | |
+| `fsync` | one `F_FULLFSYNC` for each 64 files | 0.50 to 0.53 s | |
+| nothing | one flush of the file system (`syncfs`; on macOS `fsync_volume_np`) | 0.34 to 0.35 s | 0.35 to 1.4 s |
+| nothing | one flush of the file system for each 256 files | 0.64 to 0.68 s | 0.68 to 3.0 s |
+
+On macOS an `fsync` costs next to nothing and one `F_FULLFSYNC` about four
+milliseconds, so the first is done for each file and the second once. On
+Linux an `fsync` costs one to two and a half milliseconds on this disk and
+`syncfs` about fifty, whatever the number of files, so `syncfs` is done
+once. The Linux machine was in use, and its last round was two to four
+times slower in every row.
+
+Then `mux cp` itself, before and after, next to the tools it is to take the
+place of. The same 3,000 files, 47 MiB, the tools taking turns.
+
+| | macOS, folder to folder | Linux, folder to folder | From the Linux machine over SSH (Wi-Fi) |
+| --- | ---: | ---: | ---: |
+| `mux cp` before | 9.9 to 11.1 s | 0.79 to 0.83 s | 11.0 to 12.3 s |
+| `mux cp` now | 0.42 to 0.55 s | 0.22 to 0.24 s | 2.6 to 4.6 s |
+| `cp -R` | 0.60 to 0.65 s | 0.10 s | |
+| `rsync -a` | 0.60 to 0.64 s | 0.19 to 0.22 s | 2.0 to 3.6 s |
+
+- **On macOS** (Apple silicon, APFS; five rounds) mux is twenty times as
+  fast as it was, and faster than `cp -R` and `rsync`, neither of which
+  makes anything last.
+- **On Linux** (btrfs with compression on an encrypted disk; eight rounds)
+  it is three to four times as fast as it was, level with `rsync`, and
+  takes a little over twice what `cp` takes. The figures are those of the
+  first four rounds. In the other four something else used the disk, and
+  mux took 1.0 to 3.7 s before and 0.22 to 1.0 s now. `cp` was run with
+  `--reflink=never`. Left to itself it copies no bytes on btrfs, and takes
+  0.05 s. mux checks every byte it copies and flushes three or four times
+  in the whole copy, which `cp` does not. How much of the difference each
+  of the two is was not measured.
+- **Over SSH** the laptop copied from the Linux machine, four rounds. mux
+  is now within a second of `rsync`.
+- **One file of 512 MiB** on macOS took 0.35 to 0.40 s before and 0.35 to
+  0.39 s now, six rounds: nothing changes for a large file, which is
+  flushed by itself as it always was.
+
+How often to flush is not a number that suits every disk. The time from
+one flush to the next is ten times what the last one took, at least ten
+milliseconds and at most a second. So the flushes take about a tenth of a
+copy at most, wherever it runs.
+
+Looked at and not done:
+
+| Change | Why not |
+| --- | --- |
+| A lighter flush for each file, trusting the file system to write a file's bytes before a rename of it | ext4 promises that only for a rename that replaces a file, not for a new name, and nothing promises it for APFS. |
+| On macOS, a flush of the whole volume and no `fsync` for each file | No faster than `fsync` for each and one `F_FULLFSYNC` (the table above), and it also writes out what every other program has waiting. |
+| A thread that names the files that wait after a while | A folder that acts later by itself can meet a second opening of the same folder. Files are named as chunks arrive and when the copy ends, which needs no thread. A file can wait longer than a second only while nothing arrives at all. |
+| A flag that turns the flush off | Out of scope: a file with a final name is whole, with no exception to remember. |
+
+Not measured: ext4 and XFS, where `fsync` and `syncfs` cost differently
+from btrfs, and Windows, where each file is still flushed by itself.
 
 ## Web downloads
 

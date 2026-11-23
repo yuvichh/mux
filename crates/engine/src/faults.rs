@@ -11,8 +11,8 @@ use crate::{Error, Options, Store, Summary, transfer};
 use model::artifact::{Bitfield, FileDigest, Hash, MIN_CHUNK_SIZE};
 use model::pace;
 use model::place::{
-    Arrived, Begun, Capabilities, Description, Event, Expected, Failure, Foreknown, Observer,
-    Pending, Reader, Sink, Source, Status, Supplier, SupplierId, Supply, Verification,
+    Arrived, Begun, Capabilities, Description, Event, Expected, Failure, Foreknown, Naming,
+    Observer, Pending, Reader, Sink, Source, Status, Supplier, SupplierId, Supply, Verification,
 };
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -322,8 +322,12 @@ impl Sink for Hooked {
         self.place.note(file, offset, data)
     }
 
-    fn commit(&self, file: usize) -> Result<(), Failure> {
+    fn commit(&self, file: usize) -> Result<Naming, Failure> {
         self.place.commit(file)
+    }
+
+    fn settle(&self) -> Result<Vec<usize>, Failure> {
+        self.place.settle()
     }
 
     fn abort(&self, file: usize) -> Result<(), Failure> {
@@ -472,6 +476,18 @@ impl Ran {
             .all(|(file, _)| self.place.committed(file).as_ref() == Some(&sample.files[file]))
     }
 
+    /// The files that were told of as named, in order of position. One
+    /// that was told of twice is here twice.
+    fn told_of(&self) -> Vec<usize> {
+        let named = |event: &Event| match event {
+            Event::Committed { file } => Some(*file),
+            _ => None,
+        };
+        let mut told: Vec<usize> = self.events.iter().filter_map(named).collect();
+        told.sort_unstable();
+        told
+    }
+
     fn stored_from(&self, number: u8) -> u64 {
         let Ok(summary) = &self.outcome else { return 0 };
         let from = summary.sources.iter().find(|(id, _)| *id == [number; 32]);
@@ -539,6 +555,39 @@ fn everything_that_happens_is_reported_once() {
     assert_eq!(committed[0], 2);
     committed.sort_unstable();
     assert_eq!(committed, [1, 2, 4, 5]);
+}
+
+/// A place may hold a file that is whole back, to make several last
+/// together. By the end of the transfer each has its name, and was told of
+/// once, when it had it.
+#[test]
+fn a_place_that_holds_files_back_has_named_them_all_by_the_end() {
+    let sample = sample();
+    let place = Memory::that_holds_back(sample.artifact.tree().clone());
+    let seen = place.clone();
+    let wrong: Arc<Mutex<Vec<usize>>> = Arc::default();
+    let noted = wrong.clone();
+    let mut setup = Setup::new(&sample).into(&place);
+    // As each file is told of, it is there under its name.
+    setup.on_event = Box::new(move |event| {
+        if let Event::Committed { file } = event
+            && seen.committed(file).is_none()
+        {
+            noted.lock().unwrap().push(file);
+        }
+    });
+    let ran = setup.run(&[Made::new(1, Script::honest(&sample), &sample)]);
+
+    assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
+    assert!(ran.has_every_file(&sample));
+    assert_eq!(ran.told_of(), [1, 2, 4, 5]);
+    assert_eq!(*wrong.lock().unwrap(), [0usize; 0], "told of before named");
+    // Nothing is left to name when the tree is finished.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(ran.store.finish()).unwrap();
+    assert_eq!(ran.store.newly_named(), [0usize; 0]);
 }
 
 #[test]
@@ -1974,6 +2023,7 @@ proptest! {
         scripts in vec(script(7), 1..5),
         max_suppliers in 1usize..4,
         requests_per_supplier in 1usize..4,
+        holds_back in any::<bool>(),
     ) {
         let sample = sample();
         let total = sample.artifact.chunk_count();
@@ -1986,6 +2036,10 @@ proptest! {
             .map(|(script, number)| Made::new(number, script, &sample))
             .collect();
         let mut setup = Setup::new(&sample);
+        if holds_back {
+            // A place that names files some time after they are whole.
+            setup = setup.into(&Memory::that_holds_back(sample.artifact.tree().clone()));
+        }
         setup.options.max_suppliers = max_suppliers;
         setup.options.requests_per_supplier = requests_per_supplier;
         let ran = setup.run(&suppliers);
@@ -1995,6 +2049,7 @@ proptest! {
             Ok(summary) => {
                 prop_assert!(ran.store.is_complete());
                 prop_assert!(ran.has_every_file(&sample));
+                prop_assert_eq!(ran.told_of(), [1, 2, 4, 5], "each file is told of once");
                 let stored: u64 = summary.sources.iter().map(|(_, bytes)| bytes).sum();
                 prop_assert_eq!(stored, sample.artifact.total_size());
             }

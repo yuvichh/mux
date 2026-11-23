@@ -141,6 +141,7 @@ netlink-packet-route: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
 netlink-proto: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
 netlink-sys: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
 netwatch
+nix: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
 noq
 noq-proto
 noq-udp

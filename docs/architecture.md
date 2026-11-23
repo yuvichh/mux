@@ -132,11 +132,15 @@ to the rest of the program.
 | Trait | Does |
 | --- | --- |
 | `Source` | Says what it holds; opens a file to be read in order from an offset; reads a range of bytes. |
-| `Sink` | Makes the place ready and says which chunks it already holds; writes bytes at an offset and reads them back; keeps notes for the engine beside a file being written; commits a file; aborts a file; finishes the tree. |
+| `Sink` | Makes the place ready and says which chunks it already holds; writes bytes at an offset and reads them back; keeps notes for the engine beside a file being written; commits a file; settles, which names the committed files it held back; aborts a file; finishes the tree. |
 | `Supplier` | Is reached, says which chunks it holds and which other suppliers it knows of, and hands over a chunk. |
 
 A file being written is kept apart from the file under its final name until
-it is committed. A failure says which of five things it is (the place is
+it is committed. A place may name a file as it is committed, or hold it back
+and name it when it is settled, which lets it make many files last through
+a power cut for what one costs. The store has a place settled as chunks
+arrive, no oftener than keeps that cost near a tenth of the copy, and once
+more when the last chunk is in. A failure says which of five things it is (the place is
 unreachable, it does not hold what was asked for, it answered with something
 it must not, what it holds has changed since the transfer began, or trying
 again gains nothing), so the engine never has to know what a socket or a
@@ -199,12 +203,21 @@ an offset, so many chunks can be in flight without sharing a file cursor.
 
 A file under its final name is always whole and correct. While a file is
 being downloaded its bytes go into a part file beside it, `<name>.mux-part`.
-When the store commits the file, the folder flushes the part file and
-renames it over the final name. The directories are flushed once, when the
-download completes, so that the renames survive a power cut. So however the
-program stops, there is never a file with holes under a name a user would
-open, and a file that was already there is replaced in one step or left
-alone, never changed in place.
+When the store commits the file, the folder holds it back under that name.
+When the store settles the folder, every file that waits is flushed, all of
+them together, and then each is renamed over its final name: no file is
+renamed before the flush that covers it has returned. The directories are
+flushed once, together, when the download completes, so that the renames
+survive a power cut. So however the program stops, there is never a file
+with holes under a name a user would open, and a file that was already
+there is replaced in one step or left alone, never changed in place.
+
+What a flush of many files is differs by system, and is written out in
+`crates/fs/src/io.rs` and in [how it works](how-it-works.md): `fsync` for
+each and one `F_FULLFSYNC` on macOS, one `syncfs` on Linux. A file that is
+thrown away while it waits gets no name. One that still waits when the
+program stops is whole under its part name, and is named the next time the
+folder is made ready.
 
 Bytes are read from part files as well as whole ones, so a node serves what
 it holds while it downloads the rest.
@@ -232,7 +245,9 @@ A file that needs nothing fetched is given its name as the folder is made
 ready: one with no bytes, or a part file that was whole already. The place
 says which files those were (`Begun::named`), and the transfer reports each
 as committed before anything else, so whoever watches a copy hears of every
-file once.
+file once. A file is reported when it has its name, never before: the store
+keeps the files that were named (`Store::newly_named`), and the transfer
+tells of them as it goes and once more at its end.
 
 ## Web
 

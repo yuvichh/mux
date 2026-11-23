@@ -197,15 +197,161 @@ pub(crate) fn symlink(target: &str, path: &std::path::Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, path)
 }
 
-/// Flushes a directory, so that a rename inside it survives a power cut.
+/// What tells one file system from another. A flush of one says nothing of
+/// what is on another.
+pub(crate) type Device = u64;
+
+/// The file system `file` is on.
 #[cfg(unix)]
-pub(crate) fn sync_dir(dir: &std::path::Path) -> io::Result<()> {
-    File::open(dir)?.sync_all()
+pub(crate) fn device_of(file: &File) -> io::Result<Device> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(file.metadata()?.dev())
+}
+
+/// Where each file is flushed by itself, it does not matter which file
+/// system it is on.
+#[cfg(not(unix))]
+pub(crate) fn device_of(_file: &File) -> io::Result<Device> {
+    Ok(0)
+}
+
+// A file that is whole is made to last in two steps, so that the dear step
+// is paid once for many files. [`hand_over`] is done for each file as it is
+// committed. [`make_last`] is done once for all the files that wait, and no
+// file is named before it has returned. The directories that files were
+// renamed into are made to last the same way when the tree is finished.
+
+/// What "to last" takes, which differs from one system to the next.
+#[allow(
+    dead_code,
+    reason = "a system goes one of these ways, and never the others"
+)]
+enum Way {
+    /// macOS. `fsync` hands a file's bytes to the drive, which may keep
+    /// them in its own memory for a while. Only `F_FULLFSYNC` has the
+    /// drive write out what it holds, and it does that for everything it
+    /// holds, whichever file it was asked through. It takes about four
+    /// milliseconds, and `fsync` takes almost none. So each file is handed
+    /// over with `fsync`, and one `F_FULLFSYNC` makes all of them last. Git
+    /// does the same for the objects of a commit
+    /// (`core.fsyncMethod=batch`).
+    DriveOnce,
+    /// Linux. `fsync` does both for one file, and costs a millisecond or
+    /// more on a disk that is honest about it. `syncfs` does both for
+    /// every file of a file system in one go: its manual says it gives
+    /// what `fsync` on each file would. So nothing is done as a file is
+    /// committed, and one `syncfs` makes all that wait last. A file that
+    /// waits alone is flushed by itself, as it always was: a flush of the
+    /// whole file system would also write out whatever other programs
+    /// have waiting. `syncfs` also reports a write of any other program
+    /// that failed on that file system meanwhile, and the copy then stops
+    /// with it: that is rare, and it errs on the side of not naming a file.
+    FileSystemOnce,
+    /// Anywhere else. Each file is flushed by itself as it is committed,
+    /// as it always was, and nothing is left to do for them all.
+    Each,
+}
+
+#[cfg(target_vendor = "apple")]
+const WAY: Way = Way::DriveOnce;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const WAY: Way = Way::FileSystemOnce;
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
+const WAY: Way = Way::Each;
+
+/// Hands the bytes of a file that is whole, and what is recorded of it, to
+/// the disk. They last once [`make_last`] has returned.
+pub(crate) fn hand_over(file: &File) -> io::Result<()> {
+    match WAY {
+        Way::DriveOnce => write_out(file),
+        Way::FileSystemOnce => Ok(()),
+        Way::Each => file.sync_all(),
+    }
+}
+
+/// Makes every file last that was handed over on the file system `file` is
+/// on. `alone` says that `file` is the only one.
+pub(crate) fn make_last(file: &File, alone: bool) -> io::Result<()> {
+    match WAY {
+        // `F_FULLFSYNC`, or `fsync` on a file system that has none.
+        Way::DriveOnce => file.sync_all(),
+        Way::FileSystemOnce if alone => file.sync_all(),
+        Way::FileSystemOnce => flush_file_system(file),
+        Way::Each => Ok(()),
+    }
+}
+
+/// `fsync`, which on macOS is less than the standard library's flush.
+#[cfg(target_vendor = "apple")]
+fn write_out(file: &File) -> io::Result<()> {
+    Ok(nix::unistd::fsync(file)?)
+}
+
+/// Never called: only macOS tells the two apart.
+#[cfg(not(target_vendor = "apple"))]
+fn write_out(file: &File) -> io::Result<()> {
+    file.sync_all()
+}
+
+/// `syncfs`: every file of the file system `file` is on.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn flush_file_system(file: &File) -> io::Result<()> {
+    Ok(nix::unistd::syncfs(file)?)
+}
+
+/// Never called: only Linux has it.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn flush_file_system(file: &File) -> io::Result<()> {
+    file.sync_all()
+}
+
+/// Files, or directories, that have been handed over and are to be made
+/// to last together: for each file system, the one handed over last, kept
+/// open to ask the flush through, and whether it is the only one.
+#[derive(Debug, Default)]
+pub(crate) struct Together(Vec<(Device, File, bool)>);
+
+impl Together {
+    /// Adds `file`, which is on `device` and has been handed over.
+    pub(crate) fn add(&mut self, device: Device, file: File) {
+        // Where each file is flushed by itself there is nothing left to
+        // ask for, and so no reason to keep a file open: on Windows a file
+        // that is open and is removed keeps its name until it is closed.
+        if matches!(WAY, Way::Each) {
+            return;
+        }
+        match self.0.iter_mut().find(|last| last.0 == device) {
+            Some(last) => (last.1, last.2) = (file, false),
+            None => self.0.push((device, file, true)),
+        }
+    }
+
+    /// Makes all of them last. They are closed when this returns.
+    pub(crate) fn make_last(self) -> io::Result<()> {
+        self.0
+            .iter()
+            .try_for_each(|(_, file, alone)| make_last(file, *alone))
+    }
+}
+
+/// Makes the directories last, so that the renames inside them survive a
+/// power cut.
+#[cfg(unix)]
+pub(crate) fn sync_dirs<'a>(dirs: impl IntoIterator<Item = &'a std::path::Path>) -> io::Result<()> {
+    let mut together = Together::default();
+    for dir in dirs {
+        let dir = File::open(dir)?;
+        hand_over(&dir)?;
+        together.add(device_of(&dir)?, dir);
+    }
+    together.make_last()
 }
 
 /// Windows cannot flush a directory through a file handle. NTFS records a
 /// rename in its journal, which serves the same purpose.
 #[cfg(not(unix))]
-pub(crate) fn sync_dir(_dir: &std::path::Path) -> io::Result<()> {
+pub(crate) fn sync_dirs<'a>(
+    _dirs: impl IntoIterator<Item = &'a std::path::Path>,
+) -> io::Result<()> {
     Ok(())
 }

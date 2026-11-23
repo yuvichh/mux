@@ -195,6 +195,16 @@ pub struct Begun {
     pub older: bool,
 }
 
+/// What a place did with a file that was committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Naming {
+    /// The file has its final name.
+    Named,
+    /// The file is whole, and keeps the name it was written under until
+    /// the place is settled.
+    HeldBack,
+}
+
 /// A place data can be written to.
 ///
 /// A file being written is kept apart from the file under its final name
@@ -241,7 +251,7 @@ pub trait Sink: fmt::Debug + Send + Sync {
     }
 
     /// Writes `data` into `file` at `offset`. Nothing of it is visible
-    /// under the file's final name until [`Sink::commit`].
+    /// under the file's final name until the file is committed.
     ///
     /// # Errors
     ///
@@ -278,16 +288,33 @@ pub trait Sink: fmt::Debug + Send + Sync {
     /// Returns a failure if the notes cannot be written.
     fn note(&self, file: usize, offset: u64, data: &[u8]) -> Result<(), Failure>;
 
-    /// Gives `file` its final name, in one step. It is called once every
-    /// byte of the file has been written.
+    /// Says that every byte of `file` has been written, so that it can be
+    /// given its final name. A file is named in one step, and only once
+    /// its bytes will last through a power cut.
+    ///
+    /// A place may name the file here. Making bytes last is what costs,
+    /// and many files can be made to last together for what one costs
+    /// alone: a place where that is so holds the file back, under the name
+    /// it was written under, until [`Sink::settle`]. It says which it did.
     ///
     /// # Errors
     ///
-    /// Returns a failure if the file cannot be given its name.
-    fn commit(&self, file: usize) -> Result<(), Failure>;
+    /// Returns a failure if the file cannot be made ready or named.
+    fn commit(&self, file: usize) -> Result<Naming, Failure>;
 
-    /// Throws away what has been written to `file` and not committed.
-    /// Whatever has its final name is left as it is.
+    /// Makes every file that was committed and held back last, all of them
+    /// together, and then gives each its final name. Returns the files it
+    /// named, in the order they were committed. It can be called from
+    /// several threads at once, and with nothing held back it does nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns a failure if the files cannot be made to last or be named.
+    /// Those that were not named keep the names they were written under.
+    fn settle(&self) -> Result<Vec<usize>, Failure>;
+
+    /// Throws away what has been written to `file` and has not been given
+    /// its final name. Whatever has its final name is left as it is.
     ///
     /// # Errors
     ///
@@ -308,8 +335,9 @@ pub trait Sink: fmt::Debug + Send + Sync {
     /// Returns a failure if the place cannot be looked at.
     fn is_current(&self, file: usize) -> Result<bool, Failure>;
 
-    /// Finishes the tree once every file is committed, and makes what was
-    /// committed last through a power cut.
+    /// Finishes the tree once every file is committed, and makes the names
+    /// that were given last through a power cut. A file that is still held
+    /// back is settled first.
     ///
     /// # Errors
     ///

@@ -165,17 +165,43 @@ Integrity does not depend on trusting peers. A peer that lies wastes one
 request and is never contacted again.
 
 A file is written as `<name>.mux-part` and gets its real name only when every
-chunk of it has been verified:
+chunk of it has been verified, and its bytes are on the disk to stay:
 
 ```
  downloading   model.bin.mux-part   ██████░░██░░░░░░
- last chunk    model.bin.mux-part   ████████████████   flush to disk
- whole         model.bin            ████████████████   renamed in one step
+ last chunk    model.bin.mux-part   ████████████████   whole
+ flushed       model.bin.mux-part   ████████████████   on the disk to stay
+ named         model.bin            ████████████████   renamed in one step
 ```
 
 So a file under its real name is always complete and correct, however the
-download ended. A file that was already there is replaced by that one rename
-or left alone, never changed in place.
+download ended, and after a power cut too. A file that was already there is
+replaced by that one rename or left alone, never changed in place.
+
+`cp`, `scp` and `curl` do not flush, and `rsync` only when it is asked to
+(`--fsync`): after a power cut a file they wrote can be there with nothing
+in it. The flush is what costs. On a Mac it is four milliseconds, for one
+file or for a thousand, so a flush for each of 3,000 small files took ten
+seconds where the copying takes half of one.
+
+So the flush is shared. A file that is whole waits under its part name.
+From time to time, and at the end, all the files that wait are flushed
+together, and then each is named:
+
+| System | As each file becomes whole | Once for all that wait |
+| --- | --- | --- |
+| macOS | `fsync`: the bytes go to the drive | `F_FULLFSYNC`: the drive writes out all it holds |
+| Linux | nothing | `syncfs`: every file of the file system is written out. A file that waits alone gets an `fsync` of its own. |
+| Others | the file is flushed by itself | nothing |
+
+The time between two flushes is ten times what the last one took, and at
+most a second. So flushing takes about a tenth of a copy at most, and a file
+that is whole has its name within a second while the copy goes on. A file
+that arrives alone is named at once. The folders the files were renamed into
+are flushed the same way, together, when the copy ends.
+
+A copy that is stopped while files wait leaves them whole under their part
+names. The next run finds them, checks them and names them.
 
 ## 5. Resume is a re-hash
 

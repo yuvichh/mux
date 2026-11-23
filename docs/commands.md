@@ -487,7 +487,7 @@ field away or changes what one means.
 | --- | --- | --- |
 | `start` | A copy begins. | `source` and `destination` as they were typed, `bytes` and `files` to copy |
 | `progress` | From time to time, and when all of it is there. | `bytes` at the destination, `of` how many |
-| `file` | A file is whole and has just been given its final name. Each file that is copied gets one line: a file with no bytes as the copy begins. A file that was there already and is kept gets none. | `path` |
+| `file` | A file is whole and has just been given its final name: it can be opened as the line is read. Small files are made to last several at a time, so their lines can come in groups. Each file that is copied gets one line: a file with no bytes as the copy begins. A file that was there already and is kept gets none. | `path` |
 | `done` | A copy is finished. | `path`, `bytes`, `checked`, `fetched`, and `kept` from an earlier copy |
 | `plan` | In place of all the above, with `--dry-run`. | `source`, `destination`, `path`, `bytes`, `files`, `checked` |
 | `probe` | The answer of `mux probe`. | `place`, `name`, `kind`, `bytes`, `files`, `checked`, `parts`, and `digests`, a list of `path` and `digest`. For a ticket also `swarm`, whether its holders fetch from each other; `holders`, a list of `node` and `bytes`: how much of it that machine has, or `null` if it could not be asked; and `origins`, a list of `address` and `unused`: why a copy would not read from that web address, or `null` if it would |

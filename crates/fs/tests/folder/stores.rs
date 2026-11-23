@@ -337,12 +337,123 @@ fn a_file_has_its_final_name_only_once_it_is_whole() {
         assert!(part(&a).exists());
     }
     copy(&source, &dest, 1);
+    dest.settle();
     assert_eq!(
         fs::read(&a).unwrap(),
         fs::read(source.root().join("a.bin")).unwrap()
     );
     assert!(!part(&a).exists());
     assert!(!out.join("bundle/nested/b.bin").exists());
+}
+
+/// The sample tree as a folder to write into, with nothing in it yet, and
+/// the position of each file among its entries.
+fn opened(
+    artifact: &Arc<model::artifact::Artifact>,
+    out: &std::path::Path,
+) -> (::fs::Folder, impl Fn(&str) -> usize) {
+    use model::place::Sink;
+    let folder = ::fs::Folder::inside(artifact.tree().clone(), out);
+    let digests = artifact.clone();
+    let begun = folder.begin(&|index| digests.chunk_hash(index), &|_| {});
+    begun.expect("the folder is made ready");
+    let entries = artifact.clone();
+    let entry = move |path: &str| {
+        let found = entries
+            .entries()
+            .iter()
+            .position(|entry| entry.path == path);
+        found.unwrap()
+    };
+    (folder, entry)
+}
+
+/// A file that is whole waits under the name it was written under until the
+/// folder is settled. Then all that wait are made to last together, and each
+/// is given its name. While it waits it is read like any other.
+#[test]
+fn files_that_are_whole_wait_for_their_names_and_get_them_together() {
+    use model::place::{Naming, Sink};
+    let tmp = tempfile::tempdir().unwrap();
+    let (artifact, source, out) = sample(tmp.path());
+    let (folder, entry) = opened(&artifact, &out);
+    let names = ["nested/b.bin", "a.bin", "nested/deep/c.bin"];
+
+    for name in names {
+        let whole = fs::read(source.root().join(name)).unwrap();
+        folder.write(entry(name), 0, &whole).unwrap();
+        assert_eq!(folder.commit(entry(name)), Ok(Naming::HeldBack));
+    }
+    for name in names {
+        let whole = fs::read(source.root().join(name)).unwrap();
+        let path = out.join("bundle").join(name);
+        assert!(!path.exists(), "{name} was named before it was settled");
+        assert_eq!(fs::read(part(&path)).unwrap(), whole);
+        assert_eq!(folder.read_at(entry(name), 0, 5).unwrap(), whole[..5]);
+    }
+
+    // They are named in the order they were committed, and once.
+    assert_eq!(folder.settle(), Ok(names.map(&entry).to_vec()));
+    for name in names {
+        let whole = fs::read(source.root().join(name)).unwrap();
+        let path = out.join("bundle").join(name);
+        assert_eq!(fs::read(&path).unwrap(), whole);
+        assert!(!part(&path).exists());
+        assert_eq!(folder.read_at(entry(name), 0, 5).unwrap(), whole[..5]);
+    }
+    assert_eq!(folder.settle(), Ok(Vec::new()));
+    folder.finish().unwrap();
+}
+
+/// A file that is thrown away while it waits is not named, and the others
+/// are. Finishing the tree names whatever still waits.
+#[test]
+fn a_file_thrown_away_while_it_waits_gets_no_name() {
+    use model::place::Sink;
+    let tmp = tempfile::tempdir().unwrap();
+    let (artifact, source, out) = sample(tmp.path());
+    let (folder, entry) = opened(&artifact, &out);
+    let (a, b) = (out.join("bundle/a.bin"), out.join("bundle/nested/b.bin"));
+
+    for name in ["a.bin", "nested/b.bin"] {
+        let whole = fs::read(source.root().join(name)).unwrap();
+        folder.write(entry(name), 0, &whole).unwrap();
+        folder.commit(entry(name)).unwrap();
+    }
+    // The one that was committed last, which the flush would be asked
+    // through.
+    folder.abort(entry("nested/b.bin")).unwrap();
+    folder.finish().unwrap();
+    assert_eq!(
+        fs::read(&a).unwrap(),
+        fs::read(source.root().join("a.bin")).unwrap()
+    );
+    assert!(!b.exists() && !part(&b).exists());
+    assert_eq!(folder.settle(), Ok(Vec::new()));
+}
+
+/// A program that stops while files wait leaves them whole under the names
+/// they were written under, and none under a final name. They are found and
+/// named the next time, and are told of then.
+#[test]
+fn what_waited_when_the_program_stopped_is_named_the_next_time() {
+    use model::place::Sink;
+    let tmp = tempfile::tempdir().unwrap();
+    let (artifact, source, out) = sample(tmp.path());
+    let (folder, entry) = opened(&artifact, &out);
+    let b = out.join("bundle/nested/b.bin");
+    let whole = fs::read(source.root().join("nested/b.bin")).unwrap();
+    folder.write(entry("nested/b.bin"), 0, &whole).unwrap();
+    folder.commit(entry("nested/b.bin")).unwrap();
+    drop(folder);
+    assert!(!b.exists() && part(&b).exists());
+
+    let dest = resume(&artifact, &out);
+    assert!(dest.has(4));
+    assert_eq!(fs::read(&b).unwrap(), whole);
+    assert!(!part(&b).exists());
+    // The file with no bytes got its name the first time.
+    assert_eq!(dest.named(), [entry("nested/b.bin")]);
 }
 
 #[test]
@@ -396,6 +507,15 @@ fn a_file_already_there_is_replaced_whole_or_left_alone() {
 
     copy(&source, &dest, 1);
     copy(&source, &dest, 4);
+    // Until its replacement has the name, what was there is whole.
+    let either = |path: &std::path::Path, old: &[u8], new: &str| {
+        let found = fs::read(path).unwrap();
+        let new = fs::read(source.root().join(new)).unwrap();
+        assert!(found == old || found == new, "{path:?} is neither version");
+    };
+    either(&a, &nearly, "a.bin");
+    either(&b, b"something else", "nested/b.bin");
+    dest.settle();
     assert_eq!(
         fs::read(&a).unwrap(),
         fs::read(source.root().join("a.bin")).unwrap()
@@ -445,6 +565,7 @@ fn resuming_keeps_the_right_chunks_of_a_part_file() {
     for chunk in [1, 2, 3] {
         copy(&source, &dest, chunk);
     }
+    dest.settle();
     assert_eq!(
         fs::read(&a).unwrap(),
         fs::read(source.root().join("a.bin")).unwrap()
