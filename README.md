@@ -7,12 +7,14 @@ mux is a command-line tool for Linux, macOS and Windows. Share a folder with
 a ticket, download from the web, or sync a snapshot into an existing directory.
 Peers connect directly when possible and can use an encrypted relay connection.
 
+The website and the documentation are at [mux.yuvich.com](https://mux.yuvich.com).
+
 ## Install
 
 On **macOS or Linux**, run this in a terminal.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/yuvichh/mux/main/install.sh | sh
+curl -fsSL https://mux.yuvich.com/install.sh | sh
 ```
 
 It downloads the build for your machine, checks its SHA-256 digest and puts

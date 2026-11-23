@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs mux on macOS and Linux: https://github.com/yuvichh/mux
 #
-#     curl -fsSL https://raw.githubusercontent.com/yuvichh/mux/main/install.sh | sh
+#     curl -fsSL https://mux.yuvich.com/install.sh | sh
 #
 # It downloads the build for this machine from the project's releases,
 # checks it against the release's list of SHA-256 digests, and puts it in
@@ -14,7 +14,7 @@
 #
 # as in:
 #
-#     curl -fsSL <the address above> | MUX_INSTALL=/usr/local/bin sh
+#     curl -fsSL https://mux.yuvich.com/install.sh | MUX_INSTALL=/usr/local/bin sh
 
 set -eu
 
