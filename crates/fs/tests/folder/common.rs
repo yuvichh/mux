@@ -68,9 +68,16 @@ impl Store {
         self.folder.root()
     }
 
-    /// The files that got their names as the folder was opened.
+    /// The files that got their names since this was last asked: the
+    /// first time, those that got theirs as the folder was opened.
     pub(crate) fn named(&self) -> Vec<usize> {
-        self.store.named_at_the_start()
+        self.store.newly_named()
+    }
+
+    /// Has every file that is whole given its name, which a transfer does
+    /// from time to time and at its end.
+    pub(crate) fn settle(&self) {
+        wait(self.store.settle()).expect("the folder is settled");
     }
 
     pub(crate) fn skipped_links(&self) -> usize {

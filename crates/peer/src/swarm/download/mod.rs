@@ -480,8 +480,9 @@ pub async fn fetch(
     let summary = engine::transfer(share.store(), me, suppliers, limits, observer).await?;
 
     // Each file was flushed and renamed into place as its last chunk
-    // arrived. What is left is to give the directories their times and
-    // permissions, and to make the renames themselves last.
+    // arrived, or a moment after with others. What is left is to give the
+    // directories their times and permissions, and to make the renames
+    // themselves last.
     share.store().finish().await?;
     progress.set_phase(Phase::Done);
     if let Some(offering) = offering {

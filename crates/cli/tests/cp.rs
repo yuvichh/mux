@@ -362,6 +362,47 @@ async fn every_file_of_a_folder_is_told_to_a_program_once() {
     assert_eq!(told(&output), (4, Vec::new()));
 }
 
+/// Many small files are made to last together, some time after each is
+/// whole, and a file has its name only after that. A program is told of a
+/// file when it has its name and not before: it can open the file the
+/// moment it reads the line.
+#[test]
+fn a_file_is_there_when_a_program_is_told_of_it() {
+    use std::io::{BufRead, BufReader};
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("many");
+    for number in 0..400usize {
+        let folder = source.join(format!("d{}", number % 8));
+        std::fs::create_dir_all(&folder).unwrap();
+        let contents = bytes(3000 + number, number as u64);
+        std::fs::write(folder.join(format!("f{number}")), contents).unwrap();
+    }
+    let out = tmp.path().join("out");
+    let into = format!("{}/", text(&out));
+
+    let mut copy = Command::new(BIN)
+        .args(["cp", "--json", text(&source), &into])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut told = 0;
+    for line in BufReader::new(copy.stdout.take().unwrap()).lines() {
+        let line: serde_json::Value = serde_json::from_str(&line.unwrap()).unwrap();
+        if line["event"] != "file" {
+            continue;
+        }
+        let path = PathBuf::from(line["path"].as_str().unwrap());
+        let from = source.join(path.strip_prefix(out.join("many")).unwrap());
+        let (found, sent) = (std::fs::read(&path), std::fs::read(from).unwrap());
+        assert_eq!(found.ok(), Some(sent), "{path:?} was told of too soon");
+        told += 1;
+    }
+    assert!(copy.wait().unwrap().success());
+    assert_eq!(told, 400);
+    assert_same_tree(&source, &out.join("many"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_folder_that_cannot_be_copied_says_why() {
     let tmp = tempfile::tempdir().unwrap();

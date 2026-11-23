@@ -54,6 +54,16 @@ first. Each line names the pull request that made the change.
 
 ### Changed
 
+- **Many small files are copied up to twenty times as fast.** A file has
+  its final name only once its bytes will last through a power cut, as
+  before. The flush that takes was done for each file, and is now done
+  once for all the files that became whole at about the same moment.
+  3,000 files of 16 KiB from one folder to another: 10 s before and 0.5 s
+  now on macOS, where `cp -R` takes 0.6 s; 0.8 s and 0.2 s on Linux. Over
+  SSH, 11 s and 3 s. A large file takes what it took (#137).
+- With `--json`, the `file` lines of small files can come several at a
+  time. Each is still written when the file has its name, never before
+  (#137).
 - An error message names a ticket by the id of what it offers, and leaves
   its secret out (#126).
 

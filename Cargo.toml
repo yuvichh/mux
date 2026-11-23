@@ -36,7 +36,7 @@ iroh-relay = { version = "1.4", default-features = false, features = ["server"] 
 # The QUIC library inside iroh, named for the one thing iroh does not pass
 # on: the congestion control that is not the default.
 noq-proto = { version = "1.4", default-features = false }
-nix = { version = "0.32", default-features = false, features = ["resource"] }
+nix = { version = "0.32", default-features = false, features = ["fs", "resource"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 proptest = "1.12"
 rayon = "1.10"

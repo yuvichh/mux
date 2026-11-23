@@ -2,9 +2,11 @@ use crate::sync;
 use model::artifact::{Artifact, Bitfield, EntryKind, FileDigest, Hash, Tree};
 use model::assembly::Assembly;
 use model::notes::Notes;
-use model::place::{Begun, Failure, Foreknown, Sink, Source, Verification};
+use model::place::{Begun, Failure, Foreknown, Naming, Sink, Source, Verification};
 use model::search::ChunkHints;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, TryLockError};
+use std::time::{Duration, Instant};
 
 /// What became of a chunk handed to a [`Store`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,9 +18,46 @@ pub enum Put {
     Held,
     /// The chunk is stored.
     Stored,
-    /// The chunk is stored, and it was the last of this file, which now has
-    /// its final name.
+    /// The chunk is stored, and it was the last of this file, which is
+    /// committed. It has its final name now or a moment later: see
+    /// [`Store::newly_named`].
     Completed(usize),
+}
+
+/// A place is settled at most this often: the time from one settling to
+/// the next is this many times what the last one took. So making files last
+/// never takes more than about a tenth of a copy, however many files there
+/// are and whatever a flush costs on the disk they go to.
+const SETTLING_SHARE: u32 = 10;
+
+/// The shortest time from one settling to the next. A flush that took no
+/// time at all says little of what the next will take.
+const LEAST_GAP: Duration = Duration::from_millis(10);
+
+/// The longest time from one settling to the next, which is the longest a
+/// file that is whole waits for its name while chunks go on arriving.
+const MOST_GAP: Duration = Duration::from_secs(1);
+
+/// When a place was last settled.
+#[derive(Debug, Default)]
+struct Settled {
+    /// When it ended, and how long it took. `None` until the first time.
+    last: Option<(Instant, Duration)>,
+}
+
+impl Settled {
+    /// Whether the place may be settled again at `now`. The first time it
+    /// always may, so a file that arrives alone is named at once.
+    fn due(&self, now: Instant) -> bool {
+        self.last
+            .is_none_or(|(ended, took)| now.saturating_duration_since(ended) >= gap(took))
+    }
+}
+
+/// How long to leave a place alone after a settling that took `took`.
+fn gap(took: Duration) -> Duration {
+    took.saturating_mul(SETTLING_SHARE)
+        .clamp(LEAST_GAP, MOST_GAP)
 }
 
 /// A tree's chunks in a place, addressed by chunk index.
@@ -27,6 +66,10 @@ pub enum Put {
 /// it checks what arrives before the place is given it, knows which chunks
 /// are held, and has a file committed the moment its last chunk is in.
 /// `model::assembly`, which is proven, makes that last call.
+///
+/// A place may hold a committed file back, to make many files last for
+/// what one costs. The store has it settled as chunks go on arriving, no
+/// oftener than keeps that cost small, and once more at the end.
 ///
 /// The digest of each chunk is either known from the start, in which case a
 /// chunk is compared with it before it is kept, or learned as the chunk
@@ -41,9 +84,13 @@ pub struct Store {
     sink: Option<Arc<dyn Sink>>,
     /// Which chunks are in the place, and which files are whole.
     assembly: RwLock<Assembly>,
-    /// The files the place named as it was made ready, until they are
+    /// The files that have been given their final names, until they are
     /// asked for.
     named: Mutex<Vec<usize>>,
+    /// Whether the place holds back a file that was committed.
+    held_back: AtomicBool,
+    /// When the place was last settled. Held while it is being settled.
+    settled: Mutex<Settled>,
     /// One for each entry, held while a chunk is added to that file, so the
     /// file is not committed while another chunk is being written into it.
     writing: Vec<Mutex<()>>,
@@ -176,6 +223,8 @@ impl Store {
             // then starts from nothing held.
             assembly: RwLock::new(Assembly::new(tree.layout().clone(), begun.held)),
             named: Mutex::new(begun.named),
+            held_back: AtomicBool::new(false),
+            settled: Mutex::default(),
             writing: tree.entries().iter().map(|_| Mutex::new(())).collect(),
             spoiled: OnceLock::new(),
             tree,
@@ -216,10 +265,11 @@ impl Store {
         }
     }
 
-    /// The files that were given their final names as the place was made
-    /// ready: those that needed nothing fetched. They are given once, to
-    /// whoever asks first, so that each is told of once.
-    pub fn named_at_the_start(&self) -> Vec<usize> {
+    /// The files that have been given their final names since this was
+    /// last asked. The first time, those are the files that got theirs as
+    /// the place was made ready, which needed nothing fetched. Each file is
+    /// given once, to whoever asks first, so that each is told of once.
+    pub fn newly_named(&self) -> Vec<usize> {
         std::mem::take(&mut sync::lock(&self.named))
     }
 
@@ -267,8 +317,8 @@ impl Store {
     /// Takes the bytes of chunk `index` and has the place write them. If
     /// the chunk's digest is known the bytes are compared with it first,
     /// and if not, their digest is learned. When the chunk makes a file
-    /// whole, the file is committed. Call [`Store::finish`] once the last
-    /// chunk is in.
+    /// whole, the file is committed. Call [`Store::settle`] once the last
+    /// chunk is in, to have every file named, and [`Store::finish`] after.
     ///
     /// Once started, the work runs to its end even if the caller stops
     /// waiting for it, so a file is never counted as whole and left
@@ -284,8 +334,49 @@ impl Store {
         waiting(move || store.put(index, &data)).await
     }
 
-    /// Hashes, writes and commits on the thread it is called from.
+    /// Hashes, writes and commits on the thread it is called from, and has
+    /// the place settled if that is due.
     fn put(&self, index: u64, data: &[u8]) -> Result<Put, Failure> {
+        let put = self.put_one(index, data)?;
+        if matches!(put, Put::Stored | Put::Completed(_))
+            && let Some(sink) = &self.sink
+        {
+            self.settle_if_due(&**sink)?;
+        }
+        Ok(put)
+    }
+
+    /// Settles the place if it holds a file back, if no other thread is
+    /// doing so this moment, and if it was not done too lately.
+    fn settle_if_due(&self, sink: &dyn Sink) -> Result<(), Failure> {
+        if !self.held_back.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut settled = match self.settled.try_lock() {
+            Ok(settled) => settled,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            // What this thread committed is named by the next settling.
+            Err(TryLockError::WouldBlock) => return Ok(()),
+        };
+        if !settled.due(Instant::now()) {
+            return Ok(());
+        }
+        self.settle_now(&mut settled, sink)
+    }
+
+    /// Settles the place, and keeps how long that took. A file committed
+    /// while this runs sets the mark again, and is named the next time.
+    fn settle_now(&self, settled: &mut Settled, sink: &dyn Sink) -> Result<(), Failure> {
+        self.held_back.store(false, Ordering::Release);
+        let began = Instant::now();
+        let named = sink.settle()?;
+        let ended = Instant::now();
+        settled.last = Some((ended, ended.saturating_duration_since(began)));
+        sync::lock(&self.named).extend(named);
+        Ok(())
+    }
+
+    fn put_one(&self, index: u64, data: &[u8]) -> Result<Put, Failure> {
         let location = self.tree.locate(index).ok_or_else(out_of_range)?;
         let digest = Hash::of(data);
         let acceptable = match &self.digests {
@@ -320,17 +411,39 @@ impl Store {
         {
             return Err(self.spoiled.get_or_init(|| failure).clone());
         }
-        sink.commit(file)?;
+        match sink.commit(file)? {
+            Naming::Named => sync::lock(&self.named).push(file),
+            Naming::HeldBack => self.held_back.store(true, Ordering::Release),
+        }
         Ok(Put::Completed(file))
     }
 
+    /// Has the place give every file that is committed its final name,
+    /// whenever it was last settled. [`Store::newly_named`] then gives
+    /// them. Call it once the last chunk is in.
+    ///
+    /// # Errors
+    ///
+    /// Returns the place's failure if it cannot make the files last or
+    /// name them.
+    pub async fn settle(self: &Arc<Self>) -> Result<(), Failure> {
+        let store = self.clone();
+        waiting(move || match &store.sink {
+            Some(sink) => store.settle_now(&mut sync::lock(&store.settled), &**sink),
+            None => Ok(()),
+        })
+        .await
+    }
+
     /// Finishes the tree once the last chunk is in, and makes what was
-    /// committed last through a power cut.
+    /// committed last through a power cut. A file the place still holds
+    /// back is named first, and is given by [`Store::newly_named`].
     ///
     /// # Errors
     ///
     /// Returns the place's failure if it cannot finish.
-    pub async fn finish(&self) -> Result<(), Failure> {
+    pub async fn finish(self: &Arc<Self>) -> Result<(), Failure> {
+        self.settle().await?;
         match self.sink.clone() {
             Some(sink) => waiting(move || sink.finish()).await,
             None => Ok(()),
@@ -557,4 +670,40 @@ async fn waiting<T: Send + 'static>(
                 "work on a place was cut short: {stopped}"
             )))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The time from one settling to the next follows what the last one
+    /// took, within bounds: so that the flushes of a copy take about a
+    /// tenth of it, a quick disk is not flushed thousands of times a
+    /// second, and a slow one does not keep a file waiting for long.
+    #[test]
+    fn a_place_is_left_alone_ten_times_as_long_as_its_last_settling_took() {
+        let ms = Duration::from_millis;
+        assert_eq!(gap(ms(4)), ms(40));
+        assert_eq!(gap(ms(50)), ms(500));
+        assert_eq!(gap(Duration::ZERO), LEAST_GAP);
+        assert_eq!(gap(ms(1) / 2), LEAST_GAP);
+        assert_eq!(gap(ms(300)), MOST_GAP);
+        assert_eq!(gap(Duration::MAX), MOST_GAP);
+    }
+
+    #[test]
+    fn the_first_settling_is_due_at_once_and_the_next_after_the_gap() {
+        let ms = Duration::from_millis;
+        let start = Instant::now();
+        let mut settled = Settled::default();
+        // A file that arrives alone is named the moment it is whole.
+        assert!(settled.due(start));
+
+        settled.last = Some((start, ms(4)));
+        assert!(!settled.due(start));
+        assert!(!settled.due(start + ms(39)));
+        assert!(settled.due(start + ms(40)));
+        // A clock that is read before the settling ended says "not yet".
+        assert!(!settled.due(start.checked_sub(ms(1)).unwrap_or(start)));
+    }
 }

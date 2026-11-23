@@ -1009,6 +1009,7 @@ version = "0.3.0"
 dependencies = [
  "engine",
  "model",
+ "nix",
  "proptest",
  "rayon",
  "tempfile",

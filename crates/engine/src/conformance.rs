@@ -13,7 +13,8 @@ use model::artifact::{
     Artifact, Bitfield, Entry, EntryKind, EntryMetadata, Hash, MIN_CHUNK_SIZE, Manifest, Tree,
 };
 use model::place::{
-    Arrived, Begun, Capabilities, Description, Expected, Failure, Pending, Reader, Sink, Source,
+    Arrived, Begun, Capabilities, Description, Expected, Failure, Naming, Pending, Reader, Sink,
+    Source,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -26,6 +27,11 @@ pub struct Memory {
     tree: Arc<Tree>,
     files: Arc<Mutex<Vec<Slot>>>,
     finished: Arc<AtomicBool>,
+    /// Whether a file that is committed waits for its name until the place
+    /// is settled, as in a place that makes files last together.
+    holds_back: bool,
+    /// The files that wait, in the order they were committed.
+    held_back: Arc<Mutex<Vec<usize>>>,
 }
 
 /// One entry's bytes: the version with its final name, and the one being
@@ -46,6 +52,17 @@ impl Memory {
             tree,
             files: Arc::new(Mutex::new(files)),
             finished: Arc::default(),
+            holds_back: false,
+            held_back: Arc::default(),
+        }
+    }
+
+    /// An empty place for `tree` that gives no file its name when it is
+    /// committed, and all of them theirs when it is settled.
+    pub fn that_holds_back(tree: Arc<Tree>) -> Self {
+        Self {
+            holds_back: true,
+            ..Self::new(tree)
         }
     }
 
@@ -111,9 +128,17 @@ impl Memory {
             .collect()
     }
 
+    fn waiting(&self) -> std::sync::MutexGuard<'_, Vec<usize>> {
+        self.held_back
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn open(&self, expected: &Expected<'_>, examined: &(dyn Fn(u64) + Sync)) -> Begun {
         let mut held = Bitfield::new(self.tree.chunk_count());
         let mut named = Vec::new();
+        // A program that starts again does not know what waited.
+        self.waiting().clear();
         for (file, entry) in self.tree.entries().iter().enumerate() {
             let EntryKind::File { size } = entry.kind else {
                 continue;
@@ -149,8 +174,14 @@ impl Memory {
                         }
                     }
                     let right = self.right(file, &pending, expected);
-                    slot.pending = Some(pending);
-                    slot.committed = (!old.is_empty()).then_some(old);
+                    if right.len() as u64 == chunks.end - chunks.start {
+                        // Whole, and stopped just short of its name.
+                        slot.committed = Some(pending);
+                        named.push(file);
+                    } else {
+                        slot.pending = Some(pending);
+                        slot.committed = (!old.is_empty()).then_some(old);
+                    }
                     right
                 };
                 for index in kept {
@@ -290,16 +321,35 @@ impl Sink for Memory {
         })
     }
 
-    fn commit(&self, file: usize) -> Result<(), Failure> {
+    fn commit(&self, file: usize) -> Result<Naming, Failure> {
         self.slot(file, |slot| {
             let nothing = || Failure::Fatal(format!("file {file} has nothing to commit"));
-            slot.committed = Some(slot.pending.take().ok_or_else(nothing)?);
             slot.notes.clear();
-            Ok(())
+            if self.holds_back {
+                slot.pending.as_ref().ok_or_else(nothing)?;
+                self.waiting().push(file);
+                return Ok(Naming::HeldBack);
+            }
+            slot.committed = Some(slot.pending.take().ok_or_else(nothing)?);
+            Ok(Naming::Named)
         })
     }
 
+    fn settle(&self) -> Result<Vec<usize>, Failure> {
+        let waited = std::mem::take(&mut *self.waiting());
+        Ok(self.with(|files| {
+            let named = |&file: &usize| {
+                // One that was thrown away since has nothing to name.
+                let whole = files.get_mut(file)?.pending.take()?;
+                files[file].committed = Some(whole);
+                Some(file)
+            };
+            waited.iter().filter_map(named).collect()
+        }))
+    }
+
     fn abort(&self, file: usize) -> Result<(), Failure> {
+        self.waiting().retain(|&waits| waits != file);
         self.slot(file, |slot| {
             slot.pending = None;
             slot.notes.clear();
@@ -326,6 +376,7 @@ impl Sink for Memory {
     }
 
     fn finish(&self) -> Result<(), Failure> {
+        self.settle()?;
         self.finished.store(true, Ordering::Relaxed);
         Ok(())
     }
@@ -504,12 +555,12 @@ where
         };
         let empty: Vec<usize> = (0..).zip(&self.sample.files).filter_map(no_bytes).collect();
         ensure(
-            store.named_at_the_start() == empty,
+            store.newly_named() == empty,
             "a new place did not name the files that have no bytes, and only those",
         )?;
         let again = self.resume("new").await?;
         ensure(
-            again.named_at_the_start().is_empty(),
+            again.newly_named().is_empty(),
             "a place named a file that had its name already",
         )
     }
@@ -522,16 +573,36 @@ where
             order.rotate_left(2);
         }
         let store = self.resume("any-order").await?;
+        let mut named = store.newly_named();
         for index in order {
             ensure(!store.has(index), "a chunk is held before it is sent")?;
             self.put(&store, index).await?;
             ensure(store.has(index), "a chunk is not held once written")?;
             // Every chunk held can be read back at once: a node serves what
-            // it has while it fetches the rest.
+            // it has while it fetches the rest, and a file that is whole
+            // and waits for its name is read like any other.
             self.same(&store, index).await?;
+            named.extend(store.newly_named());
         }
         ensure(store.is_complete(), "every chunk is in and it is not whole")?;
-        store.finish().await.map_err(|e| wrong("finishing", &e))
+        // A place may name a file some time after it is committed. By the
+        // time it is settled each has its name, and was told of once.
+        store.settle().await.map_err(|e| wrong("settling", &e))?;
+        named.extend(store.newly_named());
+        named.sort_unstable();
+        let entries = self.sample.artifact.entries();
+        let files: Vec<usize> = (0..entries.len())
+            .filter(|&file| entries[file].is_file())
+            .collect();
+        ensure(
+            named == files,
+            "not every file was told of once when it had its name",
+        )?;
+        store.finish().await.map_err(|e| wrong("finishing", &e))?;
+        ensure(
+            store.newly_named().is_empty(),
+            "a file was named twice, or after the place was settled",
+        )
     }
 
     /// Also: a chunk sent twice changes nothing, and a tree that was
@@ -556,7 +627,7 @@ where
         let again = self.resume("together").await?;
         ensure(again.is_complete(), "a finished tree is not found again")?;
         ensure(
-            again.named_at_the_start().is_empty(),
+            again.newly_named().is_empty(),
             "a finished tree was named again",
         )?;
         for index in 0..self.sample.chunks() {
@@ -922,6 +993,45 @@ mod tests {
             Arc::new(place.clone())
         });
         assert_eq!(checked.await, Ok(()));
+    }
+
+    /// So is one that holds every file back until it is settled.
+    #[tokio::test]
+    async fn a_place_that_names_files_late_is_a_place() {
+        let places: Mutex<HashMap<String, Memory>> = Mutex::default();
+        let checked = check(|tree, name| {
+            let mut places = places.lock().unwrap();
+            let place = places
+                .entry(name.to_owned())
+                .or_insert_with(|| Memory::that_holds_back(tree.clone()));
+            Arc::new(place.clone())
+        });
+        assert_eq!(checked.await, Ok(()));
+    }
+
+    /// A file that is held back has no name until the place is settled,
+    /// and is read all the while. What is thrown away meanwhile gets none.
+    #[tokio::test]
+    async fn a_file_that_is_held_back_is_named_when_the_place_is_settled() {
+        let sample = Sample::new().unwrap();
+        let place = Memory::that_holds_back(sample.artifact.tree().clone());
+        place.begin(&|_| None, &|_| {}).unwrap();
+        for file in [FIRST_FILE, SECOND_FILE] {
+            place.write(file, 0, &sample.files[file]).unwrap();
+            assert_eq!(place.commit(file), Ok(Naming::HeldBack));
+            assert_eq!(place.committed(file), None, "named too soon");
+        }
+        let read = Source::read(&place, FIRST_FILE, 0, 4).await;
+        assert_eq!(read.as_deref(), Ok(&sample.files[FIRST_FILE][..4]));
+        place.abort(SECOND_FILE).unwrap();
+
+        assert_eq!(place.settle(), Ok(vec![FIRST_FILE]));
+        assert_eq!(
+            place.committed(FIRST_FILE),
+            Some(sample.files[FIRST_FILE].clone())
+        );
+        assert_eq!(place.committed(SECOND_FILE), None);
+        assert_eq!(place.settle(), Ok(Vec::new()));
     }
 
     /// The checks are no use unless they notice: a place that loses what it

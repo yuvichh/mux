@@ -82,12 +82,15 @@ proptest! {
     }
 
     /// Chunks may arrive in any order, and some may arrive twice. At every
-    /// moment, a file under its final name is whole and right, and the
-    /// destination ends up byte for byte the same as the source.
+    /// moment, a file under its final name is whole and right. A file that
+    /// is whole has its name once the folder is settled, which is done here
+    /// after every chunk or every few. The destination ends up byte for
+    /// byte the same as the source.
     #[test]
     fn chunks_can_arrive_in_any_order(
         files in files(),
         order in vec(any::<prop::sample::Index>(), 0..64),
+        patience in 1usize..4,
     ) {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("tree");
@@ -110,8 +113,12 @@ proptest! {
             count => order.iter().map(|pick| pick.index(count) as u64).collect(),
         };
         sequence.extend((0..total).rev());
-        for chunk in sequence {
+        for (step, chunk) in sequence.into_iter().enumerate() {
             prop_assert!(destination.write_chunk(chunk, &source.read_chunk(chunk).unwrap()).unwrap());
+            let settled = step % patience == 0;
+            if settled {
+                destination.settle();
+            }
             for (number, contents) in files.iter().enumerate() {
                 // Entry 0 is the root, and the files follow it in order.
                 let whole = artifact.file_chunks(number + 1).all(|index| destination.has(index));
@@ -120,12 +127,16 @@ proptest! {
                         prop_assert!(whole, "file{} has its name before it is whole", number);
                         prop_assert_eq!(&bytes, contents);
                     }
-                    Err(_) => prop_assert!(!whole, "file{} is whole but has no name", number),
+                    Err(_) => prop_assert!(
+                        !(whole && settled), "file{} is whole and settled but has no name", number
+                    ),
                 }
             }
         }
 
         prop_assert!(destination.is_complete());
+        // As a program that stopped here would leave it: what still waits
+        // is named when the folder is opened again.
         let reopened = Store::resume(artifact.clone(), &out).unwrap();
         prop_assert!(reopened.is_complete());
         for (number, contents) in files.iter().enumerate() {

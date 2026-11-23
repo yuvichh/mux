@@ -2,7 +2,8 @@ use super::io;
 use model::artifact::{Bitfield, EntryKind, Hash, PART_SUFFIX, Tree};
 use model::assembly::Assembly;
 use model::place::{
-    Arrived, Begun, Capabilities, Description, Expected, Failure, Pending, Reader, Sink, Source,
+    Arrived, Begun, Capabilities, Description, Expected, Failure, Naming, Pending, Reader, Sink,
+    Source,
 };
 use model::search::{ChunkHints, Searched, Wanted};
 use rayon::prelude::*;
@@ -17,10 +18,17 @@ use std::sync::{Arc, Mutex, PoisonError};
 ///
 /// A file that is whole lives under its final name. A file that is still
 /// being filled lives in a part file beside it, named with
-/// [`PART_SUFFIX`]. It is flushed to disk and renamed into place only when
-/// it is committed. So a file under a final name is always complete,
-/// however the program stops, and a file that was already there is replaced
-/// in one step or left alone, never changed in place.
+/// [`PART_SUFFIX`]. It is renamed into place only once it is committed and
+/// its bytes are on the disk to stay. So a file under a final name is
+/// always complete, however the program stops and even if the power goes,
+/// and a file that was already there is replaced in one step or left alone,
+/// never changed in place.
+///
+/// Making bytes stay is what costs: a few milliseconds each time, whether
+/// for one file or for a thousand. So a file that is committed waits under
+/// its part name, and all that wait are made to stay together and then
+/// named, when the folder is settled. What that takes on each system is
+/// told where it is done, in `io.rs`.
 ///
 /// Bytes can be read from either kind of file, so a node serves what it
 /// holds while it is still downloading the rest.
@@ -39,11 +47,26 @@ struct Inner {
     /// Whether each entry has its final name. Set after the rename, so a
     /// reader that sees it finds the file there.
     in_place: Vec<AtomicBool>,
+    /// The files that are committed and wait for their names.
+    waiting: Mutex<Waiting>,
+    /// Held while the files that wait are made to last and named, so that
+    /// this is done by one thread at a time, and the tree is not finished
+    /// in the middle of it.
+    settling: Mutex<()>,
     /// Directories that have had a file renamed into them since they were
     /// last flushed. See [`Sink::finish`].
     unflushed: Mutex<BTreeSet<PathBuf>>,
     /// Links the tree holds that this system cannot create.
     skipped_links: AtomicUsize,
+}
+
+/// Files that are whole and are still under their part names.
+#[derive(Debug, Default)]
+struct Waiting {
+    /// The entries, in the order they were committed.
+    files: Vec<usize>,
+    /// What a flush of them all is asked for through.
+    handed_over: io::Together,
 }
 
 #[derive(Clone, Copy)]
@@ -84,6 +107,8 @@ impl Folder {
                 .map(|_| AtomicBool::new(matches!(start, Start::Whole)))
                 .collect(),
             replace: matches!(start, Start::Replace),
+            waiting: Mutex::default(),
+            settling: Mutex::default(),
             unflushed: Mutex::default(),
             skipped_links: AtomicUsize::new(0),
             tree,
@@ -158,13 +183,12 @@ impl Folder {
         // A part file with every chunk right is a download that stopped just
         // before its rename. A file with no chunks has nothing to wait for.
         let assembly = Assembly::new(tree.layout().clone(), held.clone());
-        let mut named = Vec::new();
         for entry in 0..entries {
             if !self.is_in_place(entry) && assembly.is_whole(entry) {
-                self.put_in_place(entry)?;
-                named.push(entry);
+                self.hold_back(entry)?;
             }
         }
+        let named = self.name_what_waits()?;
         let mut skipped = 0;
         for (entry, described) in tree.entries().iter().enumerate() {
             if let EntryKind::Symlink { target } = &described.kind {
@@ -274,14 +298,15 @@ impl Folder {
         io::write_all_at(&part, data, offset)
     }
 
-    /// Gives a file that has every byte its final name: sets its time and
-    /// permissions, flushes it, then renames it over whatever is there.
+    /// Makes a file that has every byte ready for its final name: sets its
+    /// time and permissions, hands its bytes to the disk, and puts it among
+    /// the files that wait. It keeps its part name until
+    /// [`Folder::name_what_waits`].
     ///
     /// # Errors
     ///
-    /// Returns an error if the part file cannot be changed, flushed or
-    /// renamed.
-    fn put_in_place(&self, file: usize) -> Result<()> {
+    /// Returns an error if the part file cannot be changed or handed over.
+    fn hold_back(&self, file: usize) -> Result<()> {
         let part = self.part_path(file);
         let written = OpenOptions::new().write(true).open(&part)?;
         // Whatever was noted beside the file is not part of it.
@@ -292,9 +317,38 @@ impl Folder {
             }
             io::set_mode(&written, metadata.mode)?;
         }
-        written.sync_all()?;
-        drop(written);
-        self.rename_into_place(file, &part)
+        io::hand_over(&written)?;
+        let device = io::device_of(&written)?;
+        let mut waiting = lock(&self.0.waiting);
+        waiting.files.push(file);
+        waiting.handed_over.add(device, written);
+        Ok(())
+    }
+
+    /// Makes every file that waits last, all those on one file system
+    /// together, and then gives each its final name, over whatever is
+    /// there. Returns them in the order they were committed.
+    ///
+    /// No file is named before the flush that covers it has returned: that
+    /// is what keeps a file with holes from ever having a final name, and
+    /// it is the order of the lines below.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the files cannot be flushed or renamed. Those
+    /// not named stay whole under their part names, and are found and named
+    /// the next time the folder is made ready.
+    fn name_what_waits(&self) -> Result<Vec<usize>> {
+        let _one_at_a_time = lock(&self.0.settling);
+        let Waiting { files, handed_over } = std::mem::take(&mut *lock(&self.0.waiting));
+        // A file that was thrown away since is flushed with the rest, which
+        // costs nothing. The files are closed before any is renamed:
+        // Windows may refuse to rename a file that is open.
+        handed_over.make_last()?;
+        for &file in &files {
+            self.rename_into_place(file, &self.part_path(file))?;
+        }
+        Ok(files)
     }
 
     /// The notes kept after the bytes of the part file of `file`, up to
@@ -346,26 +400,31 @@ impl Folder {
     ///
     /// Returns an error if the part file is there and cannot be removed.
     fn discard(&self, file: usize) -> Result<()> {
+        lock(&self.0.waiting).files.retain(|&waits| waits != file);
         remove_if_present(&self.part_path(file))
     }
 
-    /// Finishes the tree: gives each directory its recorded time and
-    /// permissions, then flushes every directory that has had a file renamed
-    /// into it, so that the renames survive a power cut.
+    /// Finishes the tree: names whatever still waits, gives each directory
+    /// its recorded time and permissions, then flushes every directory that
+    /// has had a file renamed into it, so that the renames survive a power
+    /// cut.
     ///
     /// A file's bytes are flushed before it is renamed, so a power cut never
     /// leaves a file with holes under a final name. What it can do, until
     /// this is called, is undo a rename: the file is then found whole under
     /// its part name the next time the folder is made ready, which renames it
     /// again. Flushing a directory is slow, which is why it is done once
-    /// here and not once for each file.
+    /// here and not once for each file, and for all the directories
+    /// together.
     ///
     /// While a file is still without its final name, only the flush is done.
     ///
     /// # Errors
     ///
-    /// Returns an error if a directory cannot be changed or flushed.
+    /// Returns an error if a file cannot be named, or a directory cannot be
+    /// changed or flushed.
     fn seal(&self) -> Result<()> {
+        self.name_what_waits()?;
         let entries = self.0.tree.entries();
         if (0..entries.len()).all(|entry| self.is_in_place(entry)) {
             // Children before parents: filling a directory changes its
@@ -378,17 +437,8 @@ impl Folder {
                 }
             }
         }
-        let renamed_into = std::mem::take(
-            &mut *self
-                .0
-                .unflushed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        );
-        for dir in renamed_into {
-            io::sync_dir(&dir)?;
-        }
-        Ok(())
+        let renamed_into = std::mem::take(&mut *lock(&self.0.unflushed));
+        io::sync_dirs(renamed_into.iter().map(PathBuf::as_path))
     }
 
     /// Creates the link `entry` if this system can, replacing whatever has
@@ -416,11 +466,7 @@ impl Folder {
         let path = self.final_path(entry);
         std::fs::rename(part, &path)?;
         if let Some(parent) = path.parent() {
-            self.0
-                .unflushed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(parent.to_owned());
+            lock(&self.0.unflushed).insert(parent.to_owned());
         }
         self.0.in_place[entry].store(true, Ordering::Release);
         Ok(())
@@ -653,6 +699,12 @@ impl Folder {
 /// The result of an operation on a place.
 type Placed<T> = std::result::Result<T, Failure>;
 
+/// Locks, whether or not a thread panicked while it held the lock: what is
+/// kept under each of these is right at every step.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// A file that cannot be read because it is not there is absent. Anything
 /// else that goes wrong on a local disk is not cured by trying again.
 fn unread(error: &Error) -> Failure {
@@ -765,10 +817,10 @@ impl Sink for Folder {
         for index in placed(found)?.into_iter().flatten() {
             begun.held.set(index);
             if let Some(file) = assembly.add(index) {
-                placed(self.put_in_place(file))?;
-                begun.named.push(file);
+                placed(self.hold_back(file))?;
             }
         }
+        begun.named.extend(placed(self.name_what_waits())?);
         Ok(())
     }
 
@@ -788,8 +840,13 @@ impl Sink for Folder {
         placed(self.note_at(file, offset, data))
     }
 
-    fn commit(&self, file: usize) -> Placed<()> {
-        placed(self.put_in_place(file))
+    fn commit(&self, file: usize) -> Placed<Naming> {
+        placed(self.hold_back(file))?;
+        Ok(Naming::HeldBack)
+    }
+
+    fn settle(&self) -> Placed<Vec<usize>> {
+        placed(self.name_what_waits())
     }
 
     fn abort(&self, file: usize) -> Placed<()> {
