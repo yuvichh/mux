@@ -33,7 +33,7 @@ first. Each line names the pull request that made the change.
 - `mux probe` says whether a ticket is a swarm's (#126).
 
 - **Install in one line** on macOS and Linux:
-  `curl -fsSL https://raw.githubusercontent.com/yuvichh/mux/main/install.sh | sh`.
+  `curl -fsSL https://mux.yuvich.com/install.sh | sh`.
   It takes the build for the machine, checks it against the release's
   SHA-256 digest, and puts it in `~/.local/bin` (#127).
 - **Homebrew**: `brew install yuvichh/tap/mux` (#127).
