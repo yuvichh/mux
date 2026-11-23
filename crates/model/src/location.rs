@@ -713,6 +713,11 @@ mod tests {
             ("me@[fd00::1]:x", remote("me@[fd00::1]", None, "x")),
             // One letter is a host when a user is named with it.
             ("me@c:x", remote("me@c", None, "x")),
+            // An `@` after the colon is in the path, and names no user.
+            (
+                "server:shots/img@2x.png",
+                remote("server", None, "shots/img@2x.png"),
+            ),
             ("ssh://server/var/log", remote("server", None, "/var/log")),
             (
                 "ssh://me@server:2222/srv",
@@ -720,6 +725,13 @@ mod tests {
             ),
             ("SSH://server", remote("server", None, "")),
             ("ssh://server/~/site", remote("server", None, "site")),
+            // The home folder itself. And a name that only begins with the
+            // sign for it is a path from the root, like any other.
+            ("ssh://server/~", remote("server", None, "")),
+            (
+                "ssh://server/~alice/site",
+                remote("server", None, "/~alice/site"),
+            ),
             ("sftp://server/srv", remote("server", None, "/srv")),
             // One letter can be a host here: there is no drive to mistake it for.
             ("ssh://c/srv", remote("c", None, "/srv")),
@@ -855,7 +867,14 @@ mod tests {
 
     #[test]
     fn a_path_that_looks_like_something_else_prints_as_a_path() {
-        for (path, printed) in [("-", "./-"), ("notes:final", "./notes:final")] {
+        for (path, printed) in [
+            ("-", "./-"),
+            ("notes:final", "./notes:final"),
+            // Each of these reads as one other thing and not as the other:
+            // a place on another machine, and a scheme.
+            ("me@host:x", "./me@host:x"),
+            ("peer:x", "./peer:x"),
+        ] {
             let location = local(path);
             assert_eq!(location.to_string(), printed);
             assert_eq!(parse(printed).unwrap(), local(printed));
