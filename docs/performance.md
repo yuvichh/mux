@@ -454,6 +454,47 @@ Looked at and not done:
 Not measured: ext4 and XFS, where `fsync` and `syncfs` cost differently
 from btrfs, and Windows, where each file is still flushed by itself.
 
+## Four words: before the copy starts
+
+`mux send` and `mux get` with four words spent most of their time on things
+that are not the copy ([#138](https://github.com/yuvichh/mux/issues/138)).
+Both ends on one network, finding each other by way of the public relays, a
+folder of 4 MiB, four or five runs each:
+
+| | Before | Now |
+| --- | ---: | ---: |
+| `mux send` until a person is shown the words | 3.6 s | 0.1 to 0.2 s |
+| `mux get WORDS` | 4.8 to 5.0 s | 1.8 to 1.9 s |
+| `send`, and a `get` started by a program the moment it has the words | 8.5 s | 5.5 s |
+
+Where the five seconds of `get` went, from its log with a time on each
+line:
+
+| Step | Before | Now |
+| --- | ---: | ---: |
+| Find the other machine by its key, and reach it | 1.5 s | 1.5 s |
+| Shut down the node that asked what the words stand for | 1.0 s | |
+| Reach the other machine again, with a second node | 1.2 s | |
+| Copy 4 MiB | 0.15 s | 0.15 s |
+| Shut down | 1.0 s | 0.25 s at most |
+
+- **One node** now asks what the words stand for and fetches it.
+- **Shutting down** a node tells the other machines at once, and then
+  listens for three round trips in case they did not hear: a second,
+  through a relay. A command that has what it came for now waits a quarter
+  of a second at most. This is so for every command that ends by itself,
+  not only for `get`.
+- **`send` shows the words** as soon as what it sends is hashed, while it
+  makes itself reachable. A program reading its standard output gets them
+  only when the machine can be reached, so one that fetches at once finds
+  it: that is the 3.6 s of the 5.5 s in the last row.
+
+What is left is the finding. Of the 1.5 s, 0.25 s is the lookup of the key,
+0.55 s the connection to the relay and 0.7 s the handshake through it. The
+3.5 s a sender needs to be reachable is iroh's report on the network, which
+on a network with no working IPv6 waits three seconds for an answer that
+does not come. Neither was changed.
+
 ## Web downloads
 
 `just fetch URL` fetches one web address into a folder, three times, and

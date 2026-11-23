@@ -241,6 +241,19 @@ async fn node(key: Option<&Path>, reach: &Reach) -> anyhow::Result<Arc<Node>> {
         .context("cannot open a socket to listen on")
 }
 
+/// How long a command that is over waits for the other machines to hear
+/// that it is going. They are told at once, and a node that shuts down
+/// goes on listening for what they say back, for as long as three round
+/// trips: a second when the other machine is reached through a relay. A
+/// command that has what it came for does not wait that out.
+const LEAVE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Closes the node's connections and stops serving.
+async fn leave(node: &Node) {
+    // Whether it was heard back from in time or not, the command is over.
+    let _ = tokio::time::timeout(LEAVE, node.shutdown()).await;
+}
+
 /// This machine's key, created on first use.
 fn identity(key: Option<&Path>) -> anyhow::Result<Identity> {
     match key {

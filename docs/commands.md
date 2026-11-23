@@ -41,6 +41,10 @@ fetches them into the current folder. Both commands end by themselves:
   `mux get WORDS --no-relay --at HOST:PORT`.
 - A copy that was cut off carries on: run `mux get` with the same words
   again, while `send` still runs.
+- **For a program**, `send` writes the words alone on standard output when
+  that is not a terminal. It does so once this machine can be reached,
+  which can be a few seconds after a person is shown them: a program that
+  fetches the moment it has the words then finds the machine.
 
 `mux get <WHAT> [FOLDER]` fetches anything that can be fetched: four words,
 a ticket, a web address, or `host:path` on a machine reached by SSH. The

@@ -64,6 +64,13 @@ first. Each line names the pull request that made the change.
 - With `--json`, the `file` lines of small files can come several at a
   time. Each is still written when the file has its name, never before
   (#137).
+- **`mux get` with four words starts the copy sooner**: 1.8 s for a small
+  folder where it took 4.9 s. **`mux send` shows the words at once**, where
+  it took 3.6 s. Every command that fetches from another machine ends up to
+  a second sooner (#139).
+- `mux send` writes the words alone on standard output only when that is
+  not a terminal, and once the machine can be reached. A person is shown
+  them on standard error, as before (#139).
 - An error message names a ticket by the id of what it offers, and leaves
   its secret out (#126).
 

@@ -87,7 +87,7 @@ pub(super) async fn run(args: Args, key: Option<&Path>, json: bool) -> anyhow::R
     );
     // An offer to one machine ends when that machine has it all.
     serve(&shares, args.sharing.once, json).await;
-    node.shutdown().await;
+    super::leave(&node).await;
     Ok(())
 }
 
