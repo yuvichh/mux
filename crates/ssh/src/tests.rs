@@ -60,7 +60,6 @@ fn attrs_of(path: &Path, follow: bool) -> Option<Attrs> {
         // A socket: something that is neither.
         0o140_000
     };
-    #[cfg(unix)]
     let bits = std::os::unix::fs::PermissionsExt::mode(&found.permissions()) & 0o777;
     #[cfg(not(unix))]
     let bits = if found.is_dir() { 0o755 } else { 0o644 };
@@ -304,7 +303,6 @@ async fn a_large_read_is_many_requests_and_comes_back_whole() {
     ));
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn a_folder_is_found_with_what_it_holds_and_what_cannot_be_copied_is_left_out() {
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -545,7 +543,6 @@ async fn a_conversation_that_does_not_begin_says_why() {
 }
 
 /// Where systems keep the server that `sshd` runs for SFTP.
-#[cfg(unix)]
 const SERVERS: [&str; 4] = [
     "/usr/libexec/sftp-server",
     "/usr/lib/openssh/sftp-server",
@@ -555,7 +552,6 @@ const SERVERS: [&str; 4] = [
 
 /// The same checks against the server a real machine runs. It speaks on
 /// its input and output, as it does under `sshd`, so no login is needed.
-#[cfg(unix)]
 #[tokio::test]
 async fn the_servers_own_sftp_server_passes_the_checks() {
     let server = SERVERS.iter().find(|path| Path::new(path).exists());

@@ -19,7 +19,9 @@
 
 mod remote;
 mod session;
-#[cfg(test)]
+// The server of these tests serves a folder of this machine by its own
+// paths, and stands for a machine whose paths are written with `/`.
+#[cfg(all(test, unix))]
 mod tests;
 pub mod wire;
 
