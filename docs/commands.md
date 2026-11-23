@@ -118,9 +118,13 @@ last changed. Special files, links that lead out of the folder, and copies
 that were never finished are left out, and a note says how many. Every file
 is written under a part name first, as above.
 
-Copying a folder again copies all of it again, unless every file is already
-there with its size and time. Copying only what has changed is what `sync`
-will do. A folder cannot be copied into itself.
+Copying a folder again copies only the files that are not there with the
+size and the time of the source: the others are left alone and not read. So
+a copy that was cut off is finished by running it again, and the files it
+had finished are not fetched a second time. A file that was in flight is
+carried on with, as above. `cp` removes nothing: making a folder the same
+as another, with what was removed there removed here, is `sync`. A folder
+cannot be copied into itself.
 
 ### Standard output
 
@@ -130,7 +134,7 @@ was written, its size in bytes, and how far it was checked.
 | Checked | Meaning |
 | --- | --- |
 | `verified` | Every byte was compared with a digest given for the file. |
-| `consistent` | No digest was known. The source stayed what it was throughout. For a folder, nothing checks that: its files are read once, as they are. |
+| `consistent` | No digest was known. The source stayed what it was throughout. For a folder, nothing checks that: its files are read once, as they are. A file that was there already with the size and time of the source was not read. |
 | `already there` | Every file was there with the size and time the source gives, and nothing was read. |
 
 ### From a machine you can ssh to

@@ -47,6 +47,9 @@ struct Inner {
     /// Whether each entry has its final name. Set after the rename, so a
     /// reader that sees it finds the file there.
     in_place: Vec<AtomicBool>,
+    /// The files that were found under their final names and are taken as
+    /// they are, unread. See [`Sink::keep`].
+    kept: Vec<AtomicBool>,
     /// The files that are committed and wait for their names.
     waiting: Mutex<Waiting>,
     /// Held while the files that wait are made to last and named, so that
@@ -107,6 +110,9 @@ impl Folder {
                 .map(|_| AtomicBool::new(matches!(start, Start::Whole)))
                 .collect(),
             replace: matches!(start, Start::Replace),
+            kept: (0..tree.entries().len())
+                .map(|_| AtomicBool::new(false))
+                .collect(),
             waiting: Mutex::default(),
             settling: Mutex::default(),
             unflushed: Mutex::default(),
@@ -540,6 +546,15 @@ impl Folder {
                 older: false,
             });
         };
+        // A file that is taken as it is, is not looked at: it is there,
+        // and none of its chunks is vouched for.
+        if self.0.kept[file].load(Ordering::Acquire) {
+            return Ok(Found {
+                valid: Vec::new(),
+                in_place: true,
+                older: false,
+            });
+        }
         let chunks = tree.file_chunks(file);
         let path = self.final_path(file);
         let part = self.part_path(file);
@@ -855,6 +870,16 @@ impl Sink for Folder {
 
     fn is_current(&self, file: usize) -> Placed<bool> {
         placed(self.looks_current(file))
+    }
+
+    fn keep(&self, file: usize) -> Placed<()> {
+        // What an earlier try left beside it is of no use any more.
+        placed(self.discard(file))?;
+        if let Some(kept) = self.0.kept.get(file) {
+            kept.store(true, Ordering::Release);
+            self.0.in_place[file].store(true, Ordering::Release);
+        }
+        Ok(())
     }
 
     fn finish(&self) -> Placed<()> {

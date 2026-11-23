@@ -42,6 +42,9 @@ struct Slot {
     pending: Option<Vec<u8>>,
     /// What the engine has noted beside the pending version.
     notes: Vec<u8>,
+    /// Whether the committed version is to be taken as it is the next time
+    /// the place is made ready.
+    kept: bool,
 }
 
 impl Memory {
@@ -148,6 +151,10 @@ impl Memory {
             let chunks = self.tree.file_chunks(file);
             self.with(|files| {
                 let slot = &mut files[file];
+                // A file that is taken as it is, is not looked at.
+                if std::mem::take(&mut slot.kept) {
+                    return;
+                }
                 let committed = slot.committed.take();
                 let new = committed.is_none();
                 let old = committed.unwrap_or_default();
@@ -372,6 +379,16 @@ impl Sink for Memory {
         self.slot(file, |slot| {
             let committed = slot.committed.as_ref().map(|bytes| bytes.len() as u64);
             Ok(timed && committed.is_some() && committed == size)
+        })
+    }
+
+    fn keep(&self, file: usize) -> Result<(), Failure> {
+        self.waiting().retain(|&waits| waits != file);
+        self.slot(file, |slot| {
+            slot.pending = None;
+            slot.notes.clear();
+            slot.kept = true;
+            Ok(())
         })
     }
 

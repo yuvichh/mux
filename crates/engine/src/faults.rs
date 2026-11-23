@@ -338,6 +338,10 @@ impl Sink for Hooked {
         self.place.is_current(file)
     }
 
+    fn keep(&self, file: usize) -> Result<(), Failure> {
+        self.place.keep(file)
+    }
+
     fn finish(&self) -> Result<(), Failure> {
         self.place.finish()
     }

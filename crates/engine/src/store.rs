@@ -115,6 +115,9 @@ struct Learned {
     /// For each entry, what was known of it beforehand, and the notes its
     /// digests are written into if it has a validator.
     files: Vec<(Foreknown, Option<Notes>)>,
+    /// Whether a file with bytes in it was taken as it was in the place,
+    /// on its size and time, and so was checked against nothing.
+    kept_unread: bool,
     /// The artifact the tree turned out to be, once every digest is in.
     artifact: OnceLock<Arc<Artifact>>,
 }
@@ -204,9 +207,28 @@ impl Store {
         files: Vec<Foreknown>,
         examined: impl Fn(u64) + Send + Sync + 'static,
     ) -> Result<Arc<Self>, Failure> {
+        Self::learn_beside(tree, place, files, Vec::new(), examined).await
+    }
+
+    /// The same, with some files taken as they are in the place: each
+    /// entry of the tree that `kept` says yes to. They are files that
+    /// [`Sink::is_current`] found there with the size and the time the
+    /// tree records. They are not read, they count as held, and no digest
+    /// is learned for them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the place's failure if it cannot be made ready.
+    pub async fn learn_beside<P: Source + Sink + 'static>(
+        tree: Arc<Tree>,
+        place: Arc<P>,
+        files: Vec<Foreknown>,
+        kept: Vec<bool>,
+        examined: impl Fn(u64) + Send + Sync + 'static,
+    ) -> Result<Arc<Self>, Failure> {
         let (opened, outline) = (place.clone(), tree.clone());
         let (learned, begun) =
-            waiting(move || Learned::open(&outline, &*opened, files, &examined)).await?;
+            waiting(move || Learned::open(&outline, &*opened, files, &kept, &examined)).await?;
         let digests = Digests::Learned(learned);
         Ok(Self::over(tree, digests, place.clone(), Some(place), begun))
     }
@@ -481,17 +503,29 @@ impl Learned {
         tree: &Tree,
         sink: &dyn Sink,
         files: Vec<Foreknown>,
+        kept: &[bool],
         examined: &(dyn Fn(u64) + Sync),
     ) -> Result<(Self, Begun), Failure> {
         let mut digests = vec![None; usize::try_from(tree.chunk_count()).unwrap_or(usize::MAX)];
         let mut described = Vec::with_capacity(tree.entries().len());
         let mut files = files.into_iter();
+        let is_kept = |file: usize| kept.get(file).copied().unwrap_or(false);
+        let mut kept_unread = false;
         for (file, entry) in tree.entries().iter().enumerate() {
             let known = files.next().unwrap_or_default();
             let EntryKind::File { size } = entry.kind else {
                 described.push((known, None));
                 continue;
             };
+            if is_kept(file) {
+                // It is there as it should be, as far as size and time
+                // tell. The place is told before it is made ready, so that
+                // it looks at nothing of the file.
+                sink.keep(file)?;
+                kept_unread |= size > 0;
+                described.push((known, None));
+                continue;
+            }
             let chunks = tree.file_chunks(file);
             // The notes of this file and no more, whatever is there.
             let limit = Notes::longest(size, tree.chunk_size());
@@ -515,7 +549,14 @@ impl Learned {
 
         let noted = &digests;
         let expected = |index: u64| noted.get(usize::try_from(index).ok()?).copied()?;
-        let begun = sink.begin(&expected, examined)?;
+        let mut begun = sink.begin(&expected, examined)?;
+        // The place reports what it has checked. What was kept unread is
+        // held on the word of its size and time.
+        for file in (0..tree.entries().len()).filter(|&file| is_kept(file)) {
+            for index in tree.file_chunks(file) {
+                begun.held.set(index);
+            }
+        }
         let held = &begun.held;
         for (file, (_, notes)) in described.iter().enumerate() {
             // A file that is whole already was committed as the place was
@@ -535,6 +576,7 @@ impl Learned {
         let learned = Self {
             digests: Mutex::new(digests),
             files: described,
+            kept_unread,
             artifact: OnceLock::new(),
         };
         Ok((learned, begun))
@@ -595,13 +637,14 @@ impl Learned {
     }
 
     /// Verified if a digest was given for every file that has bytes, and
-    /// so was checked before the file was committed. Consistent otherwise.
+    /// so was checked before the file was committed. Consistent otherwise,
+    /// and if a file was kept on its size and time, which is no check.
     fn verification(&self, tree: &Tree) -> Verification {
         let files = tree.entries().iter().zip(&self.files);
         let every_one_given = files
             .filter(|(entry, _)| entry.size() > 0)
             .all(|(_, (known, _))| known.digest.is_some());
-        if every_one_given {
+        if every_one_given && !self.kept_unread {
             Verification::Verified
         } else {
             Verification::Consistent

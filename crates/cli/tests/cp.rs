@@ -362,6 +362,50 @@ async fn every_file_of_a_folder_is_told_to_a_program_once() {
     assert_eq!(told(&output), (4, Vec::new()));
 }
 
+/// A copy that is run again fetches the files that are not there, and no
+/// others: what a copy that was cut off needs to be finished.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_run_again_fetches_only_what_is_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("tree");
+    tree(&source);
+    let out = tmp.path().join("out");
+    let into = format!("{}/", text(&out));
+    let lines = |output: &Output| -> Vec<serde_json::Value> {
+        let said = String::from_utf8_lossy(&output.stdout).into_owned();
+        said.lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+
+    let first = mux(["cp", "--json", text(&source), &into]).await;
+    assert!(first.status.success(), "{}", said(&first));
+    let total = (file().len() + 9 + 1) as u64;
+    let done = lines(&first).pop().unwrap();
+    assert_eq!(
+        (&done["fetched"], &done["kept"]),
+        (&total.into(), &0.into())
+    );
+
+    let gone = out.join("tree/sub/b.txt");
+    std::fs::remove_file(&gone).unwrap();
+    let again = mux(["cp", "--json", text(&source), &into]).await;
+    assert!(again.status.success(), "{}", said(&again));
+    let told = lines(&again);
+    let named: Vec<&str> = told
+        .iter()
+        .filter(|line| line["event"] == "file")
+        .map(|line| line["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(named, [text(&gone)]);
+    let done = told.last().unwrap();
+    assert_eq!(
+        (&done["fetched"], &done["kept"]),
+        (&9.into(), &(total - 9).into())
+    );
+    assert_same_tree(&source, &out.join("tree"));
+}
+
 /// Many small files are made to last together, some time after each is
 /// whole, and a file has its name only after that. A program is told of a
 /// file when it has its name and not before: it can open the file the

@@ -76,6 +76,11 @@ first. Each line names the pull request that made the change.
 
 ### Fixed
 
+- **A copy of a folder that was cut off no longer starts again.** Run
+  again, it fetched every file a second time, those that were whole among
+  them, unless all of them were. It now leaves alone each file that is
+  there with the size and the time of the source, and fetches the rest
+  (#143).
 - The Nix flake builds again: `nix profile install github:yuvichh/mux`. It
   had left out a member of the workspace (#127).
 
