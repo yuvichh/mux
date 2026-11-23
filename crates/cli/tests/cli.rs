@@ -49,7 +49,7 @@ fn protocols_lists_what_this_build_can_use_and_needs_no_key() {
     }
     expected.extend([["mux", "yes", "no"], ["peer", "no", "yes"]]);
     if cfg!(feature = "ssh") {
-        expected.push(["ssh", "yes", "no"]);
+        expected.push(["ssh", "yes", "yes"]);
     }
     assert_eq!(rows, expected);
     // Listing protocols is no reason to give this machine a key.

@@ -64,13 +64,14 @@ commands end by themselves. The words work for the first machine that uses
 them and for no other. The two machines can be on different networks,
 behind home routers.
 
-## Copy from a server
+## Copy from or to a server
 
-If you can `ssh` to a machine, you can copy from it. Nothing is installed
-there.
+If you can `ssh` to a machine, you can copy from it and to it. Nothing is
+installed there.
 
 ```sh
 mux get server:/srv/site
+mux cp ./site server:/srv/
 ```
 
 ## Share with several machines

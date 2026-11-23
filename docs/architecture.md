@@ -10,7 +10,7 @@ this table.
 | `fs` | Local folders: hashing files into artifacts; reading and writing byte ranges; part files that are renamed into place when committed | model |
 | `peer` | Node identity, connections between nodes (iroh), wire messages, and the swarm: what a node serves, how it answers peers, and a peer as a supplier of chunks | model, engine, fs |
 | `web` | Web addresses: a file on an HTTP or HTTPS server as a place to read from | model |
-| `ssh` | Machines reached by SSH: a file or a folder on one as a place to read from, over SFTP carried by the system's own `ssh` | model |
+| `ssh` | Machines reached by SSH: a file or a folder on one as a place to read from, and a folder on one as a place to write to, over SFTP carried by the system's own `ssh` | model |
 | `cli` | The `mux` command (argument parsing, progress bars, output) and the `mux` library, which re-exports the others | all of the above |
 
 `model` touches no disk, network or clock and does not use `std`.
@@ -398,7 +398,8 @@ the figures.
 
 `host:path` names a file or a folder on a machine that `ssh` reaches. The
 `ssh` crate makes it a `Source`, and the engine copies from it as from any
-other.
+other. A folder there is also a place to copy to: a `Sink`, which passes
+the checks every place passes.
 
 ```
  mux ──▶ ssh -s host sftp ══ the user's own SSH connection ══▶ sshd ──▶ sftp-server
@@ -426,9 +427,27 @@ other.
   to them when it is opened, so the bytes of two versions are never put
   together.
 
+- **`place`** is a tree's files in a folder there, to be written. It
+  follows the rules of a local folder: a part file beside each file, the
+  engine's notes after the file's own bytes, and one rename when the file
+  is whole. The rename is OpenSSH's `posix-rename@openssh.com`, which
+  replaces what is there in one step. A server without it has what is
+  there removed first, and gets no links.
+  - What is there is looked at once, with a question for each entry on its
+    way before the first answer is read. So asking about each of 3,000
+    files is one exchange and not 3,000.
+  - Each call waits for its answers on a thread that may wait, and every
+    piece of a chunk, and everything that names a file, is on its way at
+    once. At most 16 MiB is written and not yet answered for, and at most
+    256 part files are open.
+  - A file is named as it is committed, and is not flushed: SFTP has a
+    flush for one file and none for many.
+
 Tests run it against a server written for them, which can give short
 reads, send what was not asked for and hang up, and against the system's
-own `sftp-server` as a child process, which needs no login.
+own `sftp-server` as a child process, which needs no login. The place to
+write to is run through the engine's conformance checks against that
+server.
 
 ## Swarm
 

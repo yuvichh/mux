@@ -7,7 +7,7 @@
 //! as soon as it is asked, so many can be asked before the first answer is
 //! read.
 
-use crate::wire::{self, Reply, Request};
+use crate::wire::{self, Greeting, Reply, Request};
 use model::place::Failure;
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -33,6 +33,8 @@ pub(crate) struct Session {
     outgoing: mpsc::UnboundedSender<Vec<u8>>,
     waiting: Waiting,
     next: AtomicU32,
+    /// What the other machine said of itself as the conversation began.
+    greeting: Greeting,
     /// The program that carries the conversation, if it is one. It is
     /// stopped when the session is let go of.
     _child: Option<Child>,
@@ -51,6 +53,18 @@ impl Asked {
         match self.answer.await {
             Ok(reply) => Ok(reply),
             // Nobody will answer: the conversation ended, and says why.
+            Err(_) => Err(ended(&self.waiting)),
+        }
+    }
+
+    /// Waits for the answer on the thread that asks. That is a thread that
+    /// may wait, where the engine does the asking. Where it is one of the
+    /// runtime's own, the runtime is told to do its other work elsewhere
+    /// meanwhile, which a runtime of one thread cannot.
+    pub(crate) fn wait(self) -> Result<Reply, Failure> {
+        let answer = self.answer;
+        match tokio::task::block_in_place(|| answer.blocking_recv()) {
+            Ok(reply) => Ok(reply),
             Err(_) => Err(ended(&self.waiting)),
         }
     }
@@ -133,20 +147,18 @@ impl Session {
         let greeted = async {
             input.write_all(&Request::Init.encode(0)).await.ok()?;
             input.flush().await.ok()?;
-            match wire::decode(&packet(&mut output).await.ok()??) {
-                Ok((None, Reply::Version(version))) => Some(version),
-                _ => None,
-            }
+            wire::greeting(&packet(&mut output).await.ok()??).ok()
         };
         // Give what the program said a moment to arrive, so that the
         // failure can name it.
-        let Some(version) = greeted.await else {
+        let Some(greeting) = greeted.await else {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             return Err(Failure::Unreachable(why()));
         };
-        if version < wire::VERSION {
+        if greeting.version < wire::VERSION {
             return Err(Failure::Fatal(format!(
-                "the other machine speaks version {version} of SFTP, and mux needs version {}",
+                "the other machine speaks version {} of SFTP, and mux needs version {}",
+                greeting.version,
                 wire::VERSION
             )));
         }
@@ -197,8 +209,14 @@ impl Session {
             outgoing,
             waiting,
             next: AtomicU32::new(1),
+            greeting,
             _child: child,
         }))
+    }
+
+    /// What the other machine said of itself as the conversation began.
+    pub(crate) fn greeting(&self) -> Greeting {
+        self.greeting
     }
 
     /// Asks `request`. It is on its way when this returns.

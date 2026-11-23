@@ -32,6 +32,12 @@ first. Each line names the pull request that made the change.
   every ticket did before (#126).
 - `mux probe` says whether a ticket is a swarm's (#126).
 
+- **Copy to a machine reached by SSH**: `mux cp ./site server:/srv/`, with
+  nothing installed there. It follows the rules of a copy into a folder:
+  part names until a file is whole, and a second run that sends only what
+  is missing. A file of 256 MiB goes as fast as `scp` and `rsync` send it,
+  and 3,000 small files in 3.4 to 4.4 s where `rsync` takes 2.5 to 3.3 s
+  and `scp` 105 s (#144).
 - **`mux send` and `mux get`.** `mux send ./photos` gives four words, and
   `mux get polar-bulb-catalog-range` on another machine fetches the folder
   into the current directory. The words are for the first machine that
@@ -76,6 +82,10 @@ first. Each line names the pull request that made the change.
 
 ### Fixed
 
+- A copy that finds every file already there now still makes the folders
+  and links that are missing, and gives the folders their times. A copy
+  that was stopped just after its last file left them undone, and no later
+  run put them right (#144).
 - **A copy of a folder that was cut off no longer starts again.** Run
   again, it fetched every file a second time, those that were whole among
   them, unless all of them were. It now leaves alone each file that is

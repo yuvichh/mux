@@ -71,8 +71,8 @@ $ mux cp <SOURCE>... <DESTINATION>
 
 Copies each source to the destination. A source is a web address, a file, a
 folder, a place on a machine you can `ssh` to, or a ticket for what another
-machine offers. The destination is a folder, or `peer:`, which offers the
-sources to other machines.
+machine offers. The destination is a folder, a place on a machine you can
+`ssh` to, or `peer:`, which offers the sources to other machines.
 
 ```console
 $ mux cp https://example.org/big.iso ./downloads/      # ./downloads/big.iso
@@ -168,6 +168,41 @@ SSH server has on.
   while it is read ends the copy with 5.
 - `mux sync server:/srv/site ./site` and `mux probe server:/srv/site` take
   the same places.
+
+### To a machine you can ssh to
+
+```console
+$ mux cp ./site server:/srv/
+server:/srv/site	31440012	consistent
+```
+
+The destination is written the same way, and the copy follows the rules of
+a copy into a folder. Nothing is installed there either.
+
+- `server:/srv/` is a folder to put the copy in, under the name the source
+  has. It is made if it is not there. `server:/srv/www`, with no slash at
+  its end, is that folder if it is one, and otherwise the name the copy is
+  given. `server:` is the home folder.
+- The source is anything `cp` reads but a ticket: a folder, a file, a web
+  address, a place on another machine.
+- Each file is written under a name ending `.mux-part` beside its place,
+  and gets its name in one step when every byte of it is there. So a copy
+  that is cut off, or a machine that is switched off in the middle, leaves
+  no half-written file under a name anything would open.
+- Run again, it sends only the files that are not there with the size and
+  the time of the source. A file that was in flight is begun again, unless
+  it is larger than one piece (1 MiB): then it is carried on with.
+- Files, empty folders, links that stay inside the folder, permissions and
+  times go across. Times are kept to the second.
+- **What is not promised there:** that a file lasts through a power cut of
+  the *other* machine the moment it has its name. SFTP can flush one file
+  at a time and nothing more, which made a copy of small files up to eight
+  times as slow when it was tried, so mux does not ask for it. `scp`,
+  `rsync` and `sftp` do not either.
+- A server that is not OpenSSH's may lack the request that replaces a file
+  in one step. There a file that is already there is removed and then
+  replaced, and links are left out, with a note that says how many.
+- `mux sync` to another machine is not there yet.
 - A file on this machine with a colon in its name is written `./name:1`,
   as for `scp`.
 - `MUX_SSH` names another program to run in place of `ssh`, as `GIT_SSH`
