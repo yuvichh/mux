@@ -4,6 +4,7 @@ use model::access::{Guests, Secret};
 use model::artifact::{
     Artifact, Bitfield, Entry, EntryKind, EntryMetadata, Hash, MIN_CHUNK_SIZE, Manifest, Timestamp,
 };
+use model::code::Code;
 use model::hex;
 use model::rolling::Rolling;
 use model::run;
@@ -537,5 +538,30 @@ proptest! {
         };
         prop_assert_eq!(proof(made) == proof(shown), made == shown);
         prop_assert_eq!(proof(made), proof(made));
+    }
+}
+
+proptest! {
+    /// Every code reads back from the way it is shown, and from the ways a
+    /// person might type it: in capitals, with spaces, and each word by
+    /// its first four letters.
+    #[test]
+    fn a_code_reads_back_however_it_is_typed(bytes in any::<[u8; 8]>()) {
+        let code = Code::from_random(bytes);
+        let shown = code.to_string();
+        prop_assert_eq!(shown.parse(), Ok(code));
+        prop_assert_eq!(shown.to_uppercase().replace('-', " ").parse(), Ok(code));
+        let short: Vec<String> = code.words().iter().map(|word| word.chars().take(4).collect()).collect();
+        prop_assert_eq!(short.join(".").parse(), Ok(code));
+        prop_assert_eq!(code.words().len(), 4);
+    }
+
+    /// Whatever is typed is a code or is refused, and what is read as one
+    /// shows as four words of the list.
+    #[test]
+    fn reading_a_code_never_panics(text in "[a-zA-Z .,_-]{0,60}") {
+        if let Ok(code) = text.parse::<Code>() {
+            prop_assert_eq!(code.to_string().parse(), Ok(code));
+        }
     }
 }

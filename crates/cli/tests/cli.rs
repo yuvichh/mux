@@ -828,43 +828,48 @@ fn an_offer_to_named_machines_refuses_every_other() {
     assert_eq!(files_under(&out.join("tree")), files_under(&source));
 }
 
-/// What is offered with `--once` is copied by the first machine that asks,
-/// as often as it asks, and by no machine after it.
+/// What is offered with `--once` is for the first machine that asks: a
+/// machine that comes after it is refused, and the offer ends by itself
+/// when the first has all of it.
 #[test]
 fn an_offer_made_once_is_for_the_first_machine_that_asks() {
     let tmp = tempfile::tempdir().unwrap();
     let source = tmp.path().join("tree");
     small_tree(&source);
     let mut offering = mux(&tmp.path().join("offer.key"));
-    let (_offering, ticket) = ticket_from(offering.args(["seed", "--once"]).arg(&source));
+    let (offering, ticket) = ticket_from(offering.args(["seed", "--once"]).arg(&source));
 
-    let copy = |key: &str, out: &str| {
-        with_ticket(&tmp.path().join(key), ["cp"], &ticket)
+    // The first machine asks what the ticket names, and copies nothing
+    // yet. That is asking: the place is its own from now on.
+    let first = tmp.path().join("first.key");
+    let probed = with_ticket(&first, ["probe"], &ticket).output().unwrap();
+    assert!(
+        probed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probed.stderr)
+    );
+
+    let copy = |key: &Path, out: &str| {
+        with_ticket(key, ["cp"], &ticket)
             .arg(format!("{}/", tmp.path().join(out).display()))
             .output()
             .unwrap()
     };
-    let first = copy("first.key", "first");
-    assert!(
-        first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
-    );
-    assert_eq!(
-        files_under(&tmp.path().join("first/tree")),
-        files_under(&source)
-    );
-
-    let second = copy("second.key", "second");
+    let second = copy(&tmp.path().join("second.key"), "second");
     let why = String::from_utf8_lossy(&second.stderr).into_owned();
     assert_eq!(second.status.code(), Some(7), "{why}");
     assert!(!tmp.path().join("second").exists());
 
-    // The first machine is still let in: it finds all of it there.
-    let again = copy("first.key", "first");
-    let said = String::from_utf8_lossy(&again.stderr).into_owned();
-    assert!(again.status.success(), "{said}");
-    assert!(said.contains("already there"), "{said}");
+    // The first machine is still let in, and copies.
+    let copied = copy(&first, "first");
+    let said = String::from_utf8_lossy(&copied.stderr).into_owned();
+    assert!(copied.status.success(), "{said}");
+    assert_eq!(
+        files_under(&tmp.path().join("first/tree")),
+        files_under(&source)
+    );
+    // It has all of it, so the offer is over: nobody stops it.
+    assert!(ended(offering).success());
 }
 
 /// Who may fetch is said of what is offered. A command that offers nothing,
@@ -1081,4 +1086,169 @@ fn ticket_sync_preserves_files_when_the_destination_or_trash_is_a_link() {
     sync_ticket(&key, &ticket, &to, &flags, 1);
     assert_eq!(std::fs::read(to.join("mine")).unwrap(), b"local");
     assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
+}
+
+/// Starts `mux send` for `source` on loopback, with no relay. Gives the
+/// process, the four words it wrote on standard output, and what it told
+/// a person to type on the other machine after `mux get`.
+fn send(key: &Path, source: &Path) -> (KillOnDrop, String, Vec<String>) {
+    let mut sender = KillOnDrop(
+        mux(key)
+            .arg("send")
+            .arg(source)
+            .args(["--no-relay", "--listen", "127.0.0.1:0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut words = String::new();
+    BufReader::new(sender.0.stdout.take().unwrap())
+        .read_line(&mut words)
+        .unwrap();
+    let words = words.trim().to_owned();
+    assert_eq!(words.split('-').count(), 4, "{words:?}");
+    // What follows `mux get` on the line that says what to run: the words,
+    // and where this machine is, since nothing can look it up.
+    let mut said = BufReader::new(sender.0.stderr.take().unwrap()).lines();
+    let told = said
+        .by_ref()
+        .map(Result::unwrap)
+        .find_map(|line| Some(line.split_once("mux get ")?.1.to_owned()))
+        .expect("the sender did not say what to run");
+    // What it says after that is read too, to its end: a command whose
+    // reader has gone away fails when it next speaks.
+    std::thread::spawn(move || said.for_each(drop));
+    let typed: Vec<String> = told.split_whitespace().map(str::to_owned).collect();
+    assert_eq!(typed[0], words);
+    (sender, words, typed)
+}
+
+/// Waits for a command to end by itself, and gives how it ended.
+fn ended(mut command: KillOnDrop) -> std::process::ExitStatus {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(status) = command.0.try_wait().unwrap() {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the command did not end by itself"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// `mux send` gives four words, `mux get` with them fetches into the
+/// current folder, and both commands end by themselves. The machine that
+/// sends is given no key for it: the words are its key.
+#[test]
+fn four_words_send_a_folder_and_both_commands_end_by_themselves() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("tree");
+    small_tree(&source);
+    let sender_key = tmp.path().join("sender.key");
+    let (sender, _words, typed) = send(&sender_key, &source);
+
+    let here = tmp.path().join("here");
+    std::fs::create_dir(&here).unwrap();
+    let got = mux(&tmp.path().join("receiver.key"))
+        .arg("get")
+        .args(&typed)
+        .args(["--listen", "127.0.0.1:0"])
+        .current_dir(&here)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&got.stderr).into_owned();
+    assert!(got.status.success(), "{said}");
+    assert!(
+        String::from_utf8_lossy(&got.stdout)
+            .trim_end()
+            .ends_with("\tverified")
+    );
+    assert_eq!(files_under(&here.join("tree")), files_under(&source));
+
+    assert!(ended(sender).success());
+    assert!(!sender_key.exists(), "sending with words made a key");
+}
+
+/// Other words find nothing, and say so. The offer is still there for the
+/// machine that has the right ones, typed as a person might type them.
+#[test]
+fn other_words_find_nothing_and_the_right_ones_are_read_however_they_are_typed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("tree");
+    small_tree(&source);
+    let (sender, words, typed) = send(&tmp.path().join("sender.key"), &source);
+    let get = |what: &str, out: &str| {
+        mux(&tmp.path().join("receiver.key"))
+            .args(["get", what])
+            .arg(tmp.path().join(out))
+            .args(&typed[1..])
+            .args(["--listen", "127.0.0.1:0"])
+            .output()
+            .unwrap()
+    };
+
+    let wrong = get("zoo-zoo-zoo-zoo", "wrong");
+    let why = String::from_utf8_lossy(&wrong.stderr).into_owned();
+    assert_eq!(wrong.status.code(), Some(3), "{why}");
+    assert!(why.contains("no machine answers to that code"), "{why}");
+    assert!(!tmp.path().join("wrong").exists());
+
+    // In capitals, with spaces, and each word by its first four letters.
+    let loosely: Vec<String> = words
+        .split('-')
+        .map(|word| word.chars().take(4).collect::<String>().to_uppercase())
+        .collect();
+    let right = get(&loosely.join(" "), "right");
+    assert!(
+        right.status.success(),
+        "{}",
+        String::from_utf8_lossy(&right.stderr)
+    );
+    assert_eq!(
+        files_under(&tmp.path().join("right/tree")),
+        files_under(&source)
+    );
+    assert!(ended(sender).success());
+}
+
+/// `send --ticket` is the offer that runs until it is stopped, and the
+/// flags that say who may fetch go with it and not with the four words.
+#[test]
+fn send_gives_a_ticket_when_it_is_asked_for_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("tree");
+    small_tree(&source);
+    let key = tmp.path().join("offer.key");
+    let mut offering = mux(&key);
+    let (_offering, ticket) =
+        ticket_from(offering.args(["send", "--ticket", "--swarm"]).arg(&source));
+    assert!(ticket.ends_with("&swarm=1"), "{ticket:?}");
+
+    // `get` puts what a ticket names in the folder that is named.
+    let out = tmp.path().join("out");
+    let got = with_ticket(&tmp.path().join("get.key"), ["get"], &ticket)
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        got.status.success(),
+        "{}",
+        String::from_utf8_lossy(&got.stderr)
+    );
+    assert_eq!(files_under(&out.join("tree")), files_under(&source));
+
+    let unused = tmp.path().join("unused.key");
+    let refused = mux(&unused)
+        .arg("send")
+        .arg(&source)
+        .arg("--once")
+        .output()
+        .unwrap();
+    let why = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert_eq!(refused.status.code(), Some(2), "{why}");
+    assert!(why.contains("go with --ticket"), "{why}");
+    assert!(!unused.exists());
 }

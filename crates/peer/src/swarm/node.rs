@@ -1,10 +1,11 @@
 use super::server;
-use super::share::{Access, Share};
+use super::share::{Access, Admission, Share};
 use super::{Ticket, TicketPeer, Whereabouts};
 use crate::error::Result;
 use crate::net::{Endpoint, Identity, NodeId, Options};
 use engine::{Store, sync};
 use fs::Folder;
+use model::access::Proof;
 use model::artifact::{Artifact, Hash};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -88,6 +89,26 @@ impl Node {
             .values()
             .find(|share| share.artifact().id() == artifact)
             .cloned()
+    }
+
+    /// The ids of the artifacts this node offers to `peer`, which showed
+    /// `proof`: those whose secret the proof is of, and that let it in.
+    /// `None` if the proof is right for some and none of them lets it in,
+    /// which is not the same as there being nothing.
+    pub(crate) fn offered(&self, peer: &NodeId, proof: &Proof) -> Option<Vec<Hash>> {
+        let me = self.node_id();
+        let mut offered: Vec<Hash> = Vec::new();
+        let mut refused = false;
+        for share in sync::read(&self.shares).values() {
+            match share.admit(&me, peer, proof) {
+                Admission::Admitted => offered.push(share.artifact().id()),
+                Admission::Refused => refused = true,
+                Admission::Unproven => {}
+            }
+        }
+        // In one order every time, whatever order the table gives.
+        offered.sort_unstable();
+        (!refused || !offered.is_empty()).then_some(offered)
     }
 
     /// A ticket for `share`, naming this node as the peer to ask: at each

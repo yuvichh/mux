@@ -5,7 +5,7 @@ use anyhow::Context;
 use mux::artifact::{DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE};
 use mux::net::Relays;
 use mux::store;
-use mux::swarm::{Node, Share};
+use mux::swarm::{Access, Node, Share};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -85,7 +85,8 @@ pub(super) async fn run(args: Args, key: Option<&Path>, json: bool) -> anyhow::R
         listed(&bound),
         listed(&advertised)
     );
-    serve_until_interrupted(&shares).await;
+    // An offer to one machine ends when that machine has it all.
+    serve(&shares, args.sharing.once, json).await;
     node.shutdown().await;
     Ok(())
 }
@@ -128,36 +129,39 @@ pub(super) async fn offer(
     sharing: &Sharing,
     json: bool,
 ) -> anyhow::Result<Arc<Share>> {
-    let share = index_and_seed(node, offered, sharing).await?;
-    let artifact = share.artifact();
-    eprintln!(
-        "seeding  {}  ({}, {})",
-        artifact.name(),
-        ui::bytes(artifact.total_size()),
-        ui::plural(artifact.chunk_count(), "chunk"),
-    );
+    let share = index_and_seed(node, offered, sharing.access()).await?;
     eprintln!("for      {}", sharing.in_words());
     let mut ticket = node.ticket(&share, advertised);
     ticket.origins.extend_from_slice(offered.origins);
     let ticket = ticket.to_string();
     if json {
-        let files = artifact.entries().iter().filter(|e| e.is_file()).count();
-        tell::say(&Line::Offer {
-            ticket: &ticket,
-            name: artifact.name(),
-            bytes: artifact.total_size(),
-            files: files as u64,
-        });
+        say_offer(&share, &ticket, None);
     } else {
         println!("{ticket}");
     }
     Ok(share)
 }
 
-async fn index_and_seed(
+/// Tells a program that `share` is offered: under `ticket`, and under
+/// `code` if it has one.
+pub(super) fn say_offer(share: &Share, ticket: &str, code: Option<&str>) {
+    let artifact = share.artifact();
+    let files = artifact.entries().iter().filter(|e| e.is_file()).count();
+    tell::say(&Line::Offer {
+        ticket,
+        code,
+        name: artifact.name(),
+        bytes: artifact.total_size(),
+        files: files as u64,
+    });
+}
+
+/// Hashes what is at `offered.path` and offers it from `node` to the
+/// machines `access` lets in. Says what is offered, for a person.
+pub(super) async fn index_and_seed(
     node: &Node,
     offered: &Offered<'_>,
-    sharing: &Sharing,
+    access: Access,
 ) -> anyhow::Result<Arc<Share>> {
     let (path, chunk_size) = (offered.path, offered.chunk_size);
     let total = store::measure(path).with_context(|| format!("cannot read {}", path.display()))?;
@@ -197,16 +201,47 @@ async fn index_and_seed(
              downloads and special files are not sent."
         );
     }
-    Ok(node.seed(Arc::new(indexed.artifact), indexed.root, sharing.access()))
+    let share = node.seed(Arc::new(indexed.artifact), indexed.root, access);
+    let artifact = share.artifact();
+    eprintln!(
+        "seeding  {}  ({}, {})",
+        artifact.name(),
+        ui::bytes(artifact.total_size()),
+        ui::plural(artifact.chunk_count(), "chunk"),
+    );
+    Ok(share)
 }
 
+/// Serves `shares` until the command is stopped.
 pub(super) async fn serve_until_interrupted(shares: &[Arc<Share>]) {
-    let status = ui::spinner("waiting for peers (Ctrl-C to stop)");
+    serve(shares, false, false).await;
+}
+
+/// Serves `shares` until the command is stopped. If each is `for_one`
+/// machine, also until that machine has said it holds all of each: the
+/// command then ends by itself. Says how it ended.
+pub(super) async fn serve(shares: &[Arc<Share>], for_one: bool, json: bool) {
+    let waiting = if for_one {
+        "waiting for the other machine (Ctrl-C to stop)"
+    } else {
+        "waiting for peers (Ctrl-C to stop)"
+    };
+    let status = ui::spinner(waiting);
     let interrupted = tokio::signal::ctrl_c();
     tokio::pin!(interrupted);
-    loop {
+    let fetched = async {
+        if !for_one {
+            std::future::pending::<()>().await;
+        }
+        for share in shares {
+            share.fetched_by(1).await;
+        }
+    };
+    tokio::pin!(fetched);
+    let whole = loop {
         tokio::select! {
-            _ = &mut interrupted => break,
+            _ = &mut interrupted => break false,
+            () = &mut fetched => break true,
             () = tokio::time::sleep(Duration::from_millis(500)) => {
                 let uploaded: u64 = shares.iter().map(|s| s.uploaded_bytes()).sum();
                 if uploaded > 0 {
@@ -214,10 +249,23 @@ pub(super) async fn serve_until_interrupted(shares: &[Arc<Share>]) {
                 }
             }
         }
-    }
+    };
     status.finish_and_clear();
     let uploaded: u64 = shares.iter().map(|s| s.uploaded_bytes()).sum();
-    eprintln!("stopped after uploading {}", ui::bytes(uploaded));
+    if whole {
+        eprintln!(
+            "sent     to 1 machine, which has all of it  ({} uploaded)",
+            ui::bytes(uploaded)
+        );
+        if json {
+            tell::say(&Line::Sent {
+                bytes: uploaded,
+                machines: 1,
+            });
+        }
+    } else {
+        eprintln!("stopped after uploading {}", ui::bytes(uploaded));
+    }
 }
 
 /// The `host:port` strings to put in tickets: those asked for, at the port

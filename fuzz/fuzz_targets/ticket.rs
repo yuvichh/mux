@@ -6,6 +6,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use model::artifact::Hash;
+use model::code::Code;
 use model::hex;
 use peer::net::NodeId;
 use peer::swarm::Ticket;
@@ -26,6 +27,10 @@ fuzz_target!(|data: &[u8]| {
                 .expect("a printed ticket parses");
             assert_eq!(again, ticket);
         }
+    }
+    // Four words typed by a person, in place of a ticket.
+    if let Ok(code) = text.parse::<Code>() {
+        assert_eq!(code.to_string().parse(), Ok(code));
     }
     if let Ok(hash) = text.parse::<Hash>() {
         assert_eq!(hash.to_string().parse::<Hash>().ok(), Some(hash));

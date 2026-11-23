@@ -85,6 +85,46 @@ Who is let in is the sender's choice:
 Stopping the sender ends the offer. Offering the same files again makes a
 new secret, so an old ticket opens nothing.
 
+### Four words in place of a ticket
+
+A ticket is some two hundred characters. `mux send` gives four words in
+its place, and `mux get` fetches with them.
+
+```
+ polar-bulb-catalog-range
+            │
+            │  about a million rounds of BLAKE3
+            ▼
+   ┌────────────────────────┬──────────────────────┐
+   │ a key pair             │ the secret           │
+   │ the sender listens as  │ the sender answers to│
+   └────────────────────────┴──────────────────────┘
+```
+
+The words are not looked up anywhere and no server keeps them. As the
+words of a crypto wallet are its keys, these words are the offer's
+address:
+
+- **Both machines work out the same key pair from the words.** The sender
+  listens as that key, for this one offer. The receiver, having the same
+  key, knows whom to dial, and a machine is found by its key alone.
+- **Both work out the same secret**, which is the one a ticket would
+  carry. The receiver asks what is offered under it, and from there every
+  step is a ticket's: the manifest, the chunks, each of them checked.
+- **Only the first machine is let in.** The words are short, so they are
+  used once.
+- **The sender has no key of its own in this.** Its long-lived identity is
+  not shown to anyone.
+
+The words are 4 of 2,048, which is 44 bits. Whoever carries packets
+between the two machines sees the public half of the key and could try
+words until one fits. Each try is made to cost about a million hashes, so
+trying them all is 2^64 hashes, against an offer that lasts minutes.
+
+The list is the one BIP-39 gives for the recovery phrases of wallets. No
+two of its words begin with the same four letters, which is why the first
+four letters of each are enough.
+
 ## 3. A swarm fills in
 
 This is what `--swarm` asks for. Without it, a machine that fetches serves

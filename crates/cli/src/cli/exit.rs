@@ -65,7 +65,7 @@ impl Exit {
             match cause.downcast_ref::<mux::Error>()? {
                 mux::Error::InvalidLocation(_) | mux::Error::InvalidTicket(_) => Some(Self::Usage),
                 mux::Error::Stalled(_) => Some(Self::Unreachable),
-                mux::Error::ManifestUnavailable => Some(Self::Absent),
+                mux::Error::ManifestUnavailable | mux::Error::NothingOffered => Some(Self::Absent),
                 mux::Error::Refused => Some(Self::Refused),
                 mux::Error::Place(failure) => Some(Self::of_failure(failure)),
                 _ => None,

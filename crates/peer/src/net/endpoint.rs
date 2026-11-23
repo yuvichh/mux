@@ -398,6 +398,31 @@ impl Connection {
         }
     }
 
+    /// Asks which artifacts the peer offers to whoever knows `secret`. None, if it offers
+    /// nothing under that secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Refused`] if the peer does not let this machine in, and another error
+    /// if the request fails or the answer is not a list of ids.
+    pub async fn offered(&self, secret: &Secret) -> Result<Vec<Hash>> {
+        match self.request(secret, Request::Offered).await? {
+            (Response::Offered(ids), _) => Ok(ids),
+            (Response::NotFound, _) => Ok(Vec::new()),
+            (other, _) => Err(unexpected(&other)),
+        }
+    }
+
+    /// Tells the peer that this machine now holds all of `content`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails.
+    pub async fn done(&self, content: Hash, secret: &Secret) -> Result<()> {
+        self.request(secret, Request::Done { content }).await?;
+        Ok(())
+    }
+
     /// Asks which chunks of `content` the peer holds and, in a swarm, which other peers it
     /// knows. `listed` asks the peer to tell the others of the swarm of this machine: for one
     /// that serves the content too. `None` means the peer does not hold this content for
@@ -467,6 +492,8 @@ fn unexpected(response: &Response) -> Error {
         Response::NotFound => "not-found",
         Response::Hints => "hints",
         Response::Refused => "refused",
+        Response::Offered(_) => "offered",
+        Response::Noted => "noted",
     };
     Error::Protocol(format!("unexpected {kind} response"))
 }

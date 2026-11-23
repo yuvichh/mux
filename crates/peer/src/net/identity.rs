@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
 use iroh::SecretKey;
 use model::access::Secret;
+use model::code::Code;
 use model::hex;
 use model::ticket::NodeId;
 use std::fmt;
@@ -31,15 +32,24 @@ fn read_pkcs8(pkcs8: &[u8]) -> Option<([u8; 32], Option<[u8; 32]>)> {
     (*form == KEY_WITH_PUBLIC).then_some((*secret, Some(public)))
 }
 
-/// Sixteen bytes from the source of randomness a node's key comes from: the
-/// secret of a new offer.
+/// Random bytes, from the source of randomness a node's key comes from.
+fn random() -> [u8; 32] {
+    // The private half of a key that is used for nothing else.
+    SecretKey::generate().to_bytes()
+}
+
+/// The secret of a new offer.
 pub(crate) fn random_secret() -> Secret {
-    // The private half of a key that is used for nothing else is 32 random
-    // bytes. Half of them are kept.
-    let bytes = SecretKey::generate().to_bytes();
     let mut half = [0u8; 16];
-    half.copy_from_slice(&bytes[..16]);
+    half.copy_from_slice(&random()[..16]);
     Secret::from_bytes(half)
+}
+
+/// A new code: four words for a person to pass on, in place of a ticket.
+pub fn random_code() -> Code {
+    let mut eight = [0u8; 8];
+    eight.copy_from_slice(&random()[..8]);
+    Code::from_random(eight)
 }
 
 /// A node's long-lived Ed25519 key pair.
@@ -52,6 +62,13 @@ impl Identity {
     /// Creates a new random key pair.
     pub fn generate() -> Self {
         Self::of(SecretKey::generate())
+    }
+
+    /// The key pair whose private half is `secret`: for a node that is to
+    /// be known by a key that was agreed elsewhere, as the key worked out
+    /// from a code is.
+    pub fn from_secret(secret: [u8; 32]) -> Self {
+        Self::of(SecretKey::from_bytes(&secret))
     }
 
     fn of(secret: SecretKey) -> Self {

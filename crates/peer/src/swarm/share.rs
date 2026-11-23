@@ -92,6 +92,10 @@ pub struct Share {
     hints: OnceLock<Vec<OnceCell<ChunkHints>>>,
     participants: Mutex<HashMap<NodeId, Participant>>,
     uploaded: AtomicU64,
+    /// The machines that have said they hold all of it.
+    done: Mutex<Vec<NodeId>>,
+    /// Told each time one more says so.
+    one_more: tokio::sync::Notify,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +122,8 @@ impl Share {
             hints: OnceLock::new(),
             participants: Mutex::new(HashMap::new()),
             uploaded: AtomicU64::new(0),
+            done: Mutex::default(),
+            one_more: tokio::sync::Notify::new(),
         }
     }
 
@@ -213,6 +219,29 @@ impl Share {
             .map_err(|error| Error::Transport(error.to_string()))?
         })
         .await
+    }
+
+    /// Notes that `peer` has said it holds all of this share.
+    pub(crate) fn note_done(&self, peer: NodeId) {
+        let mut done = sync::lock(&self.done);
+        if !done.contains(&peer) {
+            done.push(peer);
+            self.one_more.notify_waiters();
+        }
+    }
+
+    /// Waits until `machines` machines have said they hold all of this
+    /// share. It is what lets an offer to one machine end by itself.
+    pub async fn fetched_by(&self, machines: usize) {
+        loop {
+            // Asked for before the count is looked at, so that a machine
+            // that says so in between is not missed.
+            let one_more = self.one_more.notified();
+            if sync::lock(&self.done).len() >= machines {
+                return;
+            }
+            one_more.await;
+        }
     }
 
     /// Bytes served to other peers so far.

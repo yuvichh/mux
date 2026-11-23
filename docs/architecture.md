@@ -449,6 +449,13 @@ swarm's.
   and tells nobody of anybody. In a swarm every holder of the ticket serves
   what it has to every other, and each is told where the others are.
 
+- **Four words in place of a ticket.** `model::code` turns four words into
+  a key pair and a secret, slowly on purpose. `mux send` binds a node with
+  that key for one offer, and `swarm::tickets` on the other machine works
+  out the same key, dials it, asks `Offered`, and has a ticket for each
+  thing. A machine that has fetched all of something says `Done`, which is
+  what lets `send` end by itself.
+
 The proof and the rule are in `model`, with no network in them: property
 tests cover both, and Kani proves for every order of asking that no more
 nodes are let in than there is room for and that a node that is not named

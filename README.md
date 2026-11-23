@@ -3,9 +3,10 @@
   <p><strong>Copy and sync files between machines.</strong></p>
 </div>
 
-mux is a command-line tool for Linux, macOS and Windows. Share a folder with
-a ticket, download from the web, or sync a snapshot into an existing directory.
-Peers connect directly when possible and can use an encrypted relay connection.
+mux is a command-line tool for Linux, macOS and Windows. Send a folder to
+another machine with four words, copy from a server you can `ssh` to, download
+from the web, or sync a folder. Machines connect directly when possible and
+can use an encrypted relay connection.
 
 The website and the documentation are at [mux.yuvich.com](https://mux.yuvich.com).
 
@@ -43,17 +44,39 @@ You can also download a build yourself.
 
 The [release][release] includes archives and SHA-256 checksums.
 
-## Share a folder
+## Send a folder
 
-On the sender, run this command and leave it running. Send the full ticket it
-prints to the recipient. The ticket holds a secret: whoever has it can
-download the snapshot while the command runs, and nobody else can.
+On the machine that has the folder:
 
 ```sh
-mux cp ./photos peer:
+mux send ./photos
 ```
 
-To let fewer machines in, add one of these.
+It prints four words, such as `polar-bulb-catalog-range`. On the other
+machine:
+
+```sh
+mux get polar-bulb-catalog-range
+```
+
+The folder arrives in the current directory, every byte checked, and both
+commands end by themselves. The words work for the first machine that uses
+them and for no other. The two machines can be on different networks,
+behind home routers.
+
+## Copy from a server
+
+If you can `ssh` to a machine, you can copy from it. Nothing is installed
+there.
+
+```sh
+mux get server:/srv/site
+```
+
+## Share with several machines
+
+`mux send --ticket ./photos` prints a ticket and runs until you stop it.
+Whoever has the ticket can download while it runs, and nobody else can.
 
 | Add | Who can download |
 | --- | --- |
@@ -61,11 +84,11 @@ To let fewer machines in, add one of these.
 | `--to ID` | Only the machine with that id. Run `mux id` on it to print the id. |
 | `--swarm` | Anyone with the ticket, and they also download from each other. |
 
-On the receiver, replace `TICKET` with the ticket you received. This creates
+On each receiver, replace `TICKET` with the ticket you received. This creates
 `./downloads/photos`. Run the same command again to resume an interrupted transfer.
 
 ```sh
-mux cp 'TICKET' ./downloads/
+mux get 'TICKET' ./downloads/
 ```
 
 ## Sync an existing folder
@@ -87,8 +110,9 @@ go to `.mux-trash` by default.
 
 | Command | Use |
 | --- | --- |
-| `mux cp server:/srv/site ./` | Copy from a machine you can `ssh` to. Nothing is installed there. |
-| `mux cp URL ./downloads/` | Download a file over HTTP or HTTPS. |
+| `mux get URL` | Download a file over HTTP or HTTPS. |
+| `mux sync server:/srv/site ./site` | Bring a folder up to date from a machine you can `ssh` to. |
+| `mux cp SOURCE... FOLDER/` | Copy several things at once, or under another name: `get` and `send` are short for it. |
 | `mux cp ./photos ./archive/` | Copy a local directory with its metadata. |
 | `mux probe 'TICKET'` | Inspect a snapshot and see which peers have it. |
 

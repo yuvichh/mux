@@ -17,13 +17,14 @@ mod selection;
 mod supplier;
 
 use self::supplier::Swarm;
-use super::{Access, Node, Share, Ticket, Whereabouts};
+use super::{Access, Node, Share, Ticket, TicketPeer, Whereabouts};
 use crate::error::{Error, Result};
-use crate::net::{NodeId, PeerInfo};
+use crate::net::{Identity, NodeId, PeerInfo};
 use engine::{Store, sync};
 use fs::Folder;
 use model::access::Secret;
-use model::artifact::{Artifact, Bitfield};
+use model::artifact::{Artifact, Bitfield, Hash};
+use model::code::Code;
 use model::place::{Event, Observer, Supplier, SupplierId};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,6 +36,8 @@ use tracing::{debug, warn};
 const MANIFEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MANIFEST_ATTEMPTS: usize = 3;
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(30);
+/// How long a machine is given to hear that a copy is whole.
+const DONE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Limits for one download.
 #[derive(Debug, Clone)]
@@ -257,6 +260,73 @@ pub async fn download(
     fetch(node, found, out_dir, options, progress, Arc::new(|_| {})).await
 }
 
+/// The tickets a code stands for: one for each thing that the machine
+/// which made the code offers.
+///
+/// The words give the key that machine listens as and the secret it
+/// answers to. It is found by that key alone, where machines are looked up
+/// by their keys, and asked what it offers. `at` names places to try for
+/// it as well, each `host:port`: for where there is nothing to look a
+/// machine up in.
+///
+/// # Errors
+///
+/// Returns [`Error::NothingOffered`] if no machine answers to the code,
+/// and [`Error::Refused`] if one does and another machine was let in
+/// before this one.
+pub async fn tickets(node: &Arc<Node>, code: Code, at: &[String]) -> Result<Vec<Ticket>> {
+    // A million hashes: not on a thread that other work waits on.
+    let keys = tokio::task::spawn_blocking(move || code.keys())
+        .await
+        .map_err(|e| Error::Transport(format!("the code could not be worked out: {e}")))?;
+    let peer = Identity::from_secret(keys.node).node_id();
+    let mut peers: Vec<TicketPeer> = at
+        .iter()
+        .map(|at| TicketPeer {
+            node: peer,
+            at: Some(Whereabouts::Address(at.clone())),
+        })
+        .collect();
+    if peers.is_empty() {
+        peers.push(TicketPeer {
+            node: peer,
+            at: None,
+        });
+    }
+    // A ticket for one thing the machine offers, once it is known which.
+    let ticket = |artifact| Ticket {
+        artifact,
+        secret: keys.secret,
+        swarm: false,
+        peers: peers.clone(),
+        origins: Vec::new(),
+    };
+    let asked = resolve(node, &ticket(Hash::of(b""))).await;
+    for attempt in 0..MANIFEST_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        for at in &asked {
+            let asking = async {
+                let connection = node.endpoint().connect(at).await?;
+                let offered = connection.offered(&keys.secret).await;
+                connection.close();
+                offered
+            };
+            match timeout(MANIFEST_TIMEOUT, asking).await {
+                Ok(Ok(offered)) if !offered.is_empty() => {
+                    return Ok(offered.into_iter().map(ticket).collect());
+                }
+                Ok(Err(Error::Refused)) => return Err(Error::Refused),
+                Ok(Ok(_)) => debug!("the machine of the code offers nothing"),
+                Ok(Err(e)) => debug!("the machine of the code could not be asked: {e}"),
+                Err(_) => debug!("the machine of the code did not answer in time"),
+            }
+        }
+    }
+    Err(Error::NothingOffered)
+}
+
 /// Finds what a ticket names: asks the peers it gives for the manifest,
 /// and checks what comes back against the ticket.
 ///
@@ -366,6 +436,9 @@ pub async fn fetch(
         scan_observer(Event::Examined { bytes });
     };
     let secret = found.access.secret;
+    // Whom to tell when all of it is here: outside a swarm, the machines
+    // that offered it.
+    let offering = (!found.swarm()).then(|| found.peers.clone());
     let hints = fetch_hints(node, &found.manifest_peer, artifact, &secret);
     let store = Store::resume_with_hints(artifact.clone(), folder.clone(), examined, hints).await?;
     let have = store.held();
@@ -411,6 +484,9 @@ pub async fn fetch(
     // permissions, and to make the renames themselves last.
     share.store().finish().await?;
     progress.set_phase(Phase::Done);
+    if let Some(offering) = offering {
+        say_done(node, &offering, artifact.content_id(), &secret).await;
+    }
 
     let known = sync::lock(&swarm.known);
     let peers = summary
@@ -437,6 +513,23 @@ pub async fn fetch(
         peers,
         elapsed: started.elapsed(),
     })
+}
+
+/// Tells the machines that offered `content` that this node holds all of
+/// it. Nothing depends on their hearing it: an offer to one machine ends
+/// by itself if they do, and waits to be stopped if they do not.
+async fn say_done(node: &Node, offering: &[PeerInfo], content: Hash, secret: &Secret) {
+    for peer in offering {
+        let telling = async {
+            let connection = node.endpoint().connect(peer).await?;
+            let told = connection.done(content, secret).await;
+            connection.close();
+            told
+        };
+        if !matches!(timeout(DONE_TIMEOUT, telling).await, Ok(Ok(()))) {
+            debug!(peer = %peer.node.short(), "could not be told that the copy is whole");
+        }
+    }
 }
 
 /// Keeps this node listed with `peers` as a holder of `share`, which is a

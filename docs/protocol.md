@@ -37,6 +37,33 @@ fetches from the peers alone.
 A ticket lets its holder fetch, as far as the offer lets nodes in. It is to
 be kept as a password is.
 
+## Codes
+
+Four words can stand in place of a ticket, for an offer to one machine.
+They are words of the English list of BIP-39: 2,048 words, so that each is
+eleven bits. A code is written with a dash between its words, in small
+letters.
+
+```
+stretched = BLAKE3 derive-key, context "mux 2026 code v1", of the code as written
+repeat 1,048,576 times:  stretched = BLAKE3(stretched)
+
+node key  = BLAKE3 derive-key, context "mux 2026 code v1 node key", of stretched
+secret    = the first 16 bytes of
+            BLAKE3 derive-key, context "mux 2026 code v1 access secret", of stretched
+```
+
+- `node key` is the private half of an Ed25519 key. The machine that
+  offers listens as that key and no other, and the machine that fetches
+  dials its public half, as it would the node id of a ticket.
+- `secret` is the secret of [Access](#access).
+- The machine that fetches asks `Offered`, and is told the artifact ids.
+  With each it has what a ticket has.
+
+For `harbor-velvet-piano-sunset` the node key is
+`c75b1d10c291e63ba22da0d7ffb3b31d936b5e56bdc09fa982e469252f43e7e4` and the
+secret `54cf1105726c6561fd6205b3e68df825`.
+
 ## Transport and identity
 
 QUIC with TLS 1.3 only, as [iroh](https://github.com/n0-computer/iroh)
@@ -97,6 +124,8 @@ so many to ask. A node that was let in once stays let in.
 | `Status { content, listed }` | `Status { have, peers }` | none |
 | `Chunk { content, index }` | `Chunk { len }` | `len` bytes of chunk data |
 | `Hints { content }` | `Hints` | one little-endian 64-bit rolling hash per manifest chunk |
+| `Offered` | `Offered(ids)` | none |
+| `Done { content }` | `Noted` | none |
 
 A receiver with an older file can ask a complete peer for the optional hint table. Its length
 comes from the verified manifest. A missing table, a malformed reply or an
@@ -106,6 +135,12 @@ against the chunk's BLAKE3 digest before copying them into the part file.
 
 Any request may be answered with `NotFound` or with `Refused`: see
 [Access](#access).
+
+`Offered` asks what the responder offers under the secret the proof is of:
+the ids of those artifacts that let the requester in. It is how a machine
+that has a [code](#codes) learns what the code is for. `Done` says that the
+requester now holds all of the content. A responder that offered it to one
+machine can then stop. Nothing depends on it being heard.
 
 A manifest is asked for by artifact id. Chunks, and who holds them, are
 asked for by content id. Two nodes that hold the same bytes under different
