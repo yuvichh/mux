@@ -15,13 +15,15 @@ $ mux cp <SOURCE>... <DESTINATION>
 ```
 
 Copies each source to the destination. A source is a web address, a file, a
-folder, or a ticket for what another machine offers. The destination is a
-folder, or `peer:`, which offers the sources to other machines.
+folder, a place on a machine you can `ssh` to, or a ticket for what another
+machine offers. The destination is a folder, or `peer:`, which offers the
+sources to other machines.
 
 ```console
 $ mux cp https://example.org/big.iso ./downloads/      # ./downloads/big.iso
 $ mux cp https://example.org/big.iso ./image.iso       # under a name of its own
 $ mux cp ./weights ./notes.txt /mnt/backup/            # a folder and a file
+$ mux cp server:/var/log/app ./logs/                   # from a machine reached by SSH
 $ mux cp ./weights peer:                               # offer it, and print a ticket
 $ mux cp 'mux://450b9c6b…' ./models/                   # ./models/weights, from whoever has it
 ```
@@ -75,6 +77,45 @@ was written, its size in bytes, and how far it was checked.
 | `verified` | Every byte was compared with a digest given for the file. |
 | `consistent` | No digest was known. The source stayed what it was throughout. For a folder, nothing checks that: its files are read once, as they are. |
 | `already there` | Every file was there with the size and time the source gives, and nothing was read. |
+
+### From a machine you can ssh to
+
+```console
+$ mux cp server:/srv/site ./
+./site	31440012	consistent
+```
+
+A source written `host:path` is a file or a folder on another machine, the
+way `scp` and `rsync` write one. **Nothing is installed there**, and nothing
+is set up: mux runs the `ssh` of this system and asks for SFTP, which every
+SSH server has on.
+
+- `host` is whatever `ssh` takes: a name, an address, `user@host`, or a
+  host of `~/.ssh/config`. Keys, agents, jump hosts and a password typed at
+  the terminal work as they do for `ssh`.
+- A path that does not begin with `/` is read from the home folder, and
+  `server:` is the home folder. `server:~/site` is the same as
+  `server:site`.
+- To give a port, write `ssh://user@host:2222/srv/site`. There the path
+  begins at the root, and `ssh://host/~/site` at the home folder.
+- A folder is copied with its files, its empty folders, links that stay
+  inside it, permissions and times. Times are kept to the second, which is
+  all SFTP carries.
+- A copy that was cut off carries on when the command is run again, and a
+  file that is there with the same size and time is not read. So the second
+  run of a finished copy reads nothing.
+- The copy is `consistent`: each file was the one that was looked at, from
+  its first byte to its last. A file that changes on the other machine
+  while it is read ends the copy with 5.
+- `mux sync server:/srv/site ./site` and `mux probe server:/srv/site` take
+  the same places.
+- A file on this machine with a colon in its name is written `./name:1`,
+  as for `scp`.
+- `MUX_SSH` names another program to run in place of `ssh`, as `GIT_SSH`
+  does for git.
+
+Copying *to* such a machine is not there yet. [Performance](performance.md#next-to-scp-rsync-and-sftp)
+has it timed next to `scp`, `rsync` and `sftp`.
 
 ### To and from another machine
 

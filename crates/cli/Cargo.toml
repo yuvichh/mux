@@ -20,12 +20,15 @@ name = "mux"
 path = "src/main.rs"
 
 [features]
-default = ["fast-apple-datapath", "web"]
+default = ["fast-apple-datapath", "ssh", "web"]
 # See `peer` for what this does.
 fast-apple-datapath = ["peer/fast-apple-datapath"]
 # Web addresses, `http://` and `https://`, as places to read from. Without
 # it the build has no HTTP client and no TLS roots of the system's.
 web = ["dep:web"]
+# Machines reached by SSH, `host:path`, as places to read from. It runs the
+# system's `ssh`, and adds no dependency.
+ssh = ["dep:ssh"]
 
 [dependencies]
 model.workspace = true
@@ -33,6 +36,7 @@ engine.workspace = true
 fs.workspace = true
 peer.workspace = true
 web = { workspace = true, optional = true }
+ssh = { workspace = true, optional = true }
 anyhow.workspace = true
 clap.workspace = true
 indicatif.workspace = true

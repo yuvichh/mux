@@ -19,6 +19,7 @@ model = { path = "crates/model", version = "0.3.0" }
 fs = { path = "crates/fs", version = "0.3.0" }
 engine = { path = "crates/engine", version = "0.3.0" }
 web = { path = "crates/web", version = "0.3.0" }
+ssh = { path = "crates/ssh", version = "0.3.0" }
 peer = { path = "crates/peer", version = "0.3.0", default-features = false }
 
 anyhow = "1"

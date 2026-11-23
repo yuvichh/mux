@@ -3,7 +3,7 @@
 use model::Error;
 use model::access::Secret;
 use model::artifact::Hash;
-use model::location::{Location, Protocol};
+use model::location::{Location, Protocol, Remote};
 use model::ticket::{NodeId, Ticket, TicketPeer, Whereabouts};
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -11,12 +11,13 @@ use std::fmt::Write;
 use std::net::IpAddr;
 
 /// A build with every protocol the model has a rule for.
-const EVERY: [Protocol; 5] = [
+const EVERY: [Protocol; 6] = [
     protocol("file", true, true),
     protocol("http", true, false),
     protocol("https", true, false),
     protocol("mux", true, false),
     protocol("peer", false, true),
+    protocol("ssh", true, false),
 ];
 
 const fn protocol(scheme: &'static str, reads: bool, writes: bool) -> Protocol {
@@ -135,9 +136,59 @@ fn web_address() -> impl Strategy<Value = (String, String)> {
     })
 }
 
+/// A place on a machine reached by SSH, in both forms it is written in:
+/// `host:path`, and `ssh://host:port/path`.
+fn remote() -> impl Strategy<Value = (String, Location)> {
+    let user = proptest::option::of("[a-z][a-z0-9_.-]{0,6}");
+    // No name mux reads as a scheme, and more than the one letter of a
+    // Windows drive.
+    let named = "[a-z][a-z0-9-]{1,10}(\\.[a-z]{2,4})?".prop_filter(
+        "a scheme mux has a meaning for",
+        |host| {
+            Location::parse(&format!("{host}://x"), &[])
+                .unwrap_err()
+                .to_string()
+                .contains("not a kind of place")
+        },
+    );
+    let host = (user, named).prop_map(|(user, host)| match user {
+        Some(user) => format!("{user}@{host}"),
+        None => host,
+    });
+    // From the root, from the home folder, or the home folder itself.
+    let path = prop_oneof![
+        Just(String::new()),
+        "/[^\\x00/][^\\x00]{0,16}",
+        "[^\\x00/~][^\\x00]{0,16}",
+    ];
+    let port = proptest::option::of(any::<u16>());
+    (host, path, port, any::<bool>()).prop_map(|(host, path, port, url)| {
+        let place = Remote {
+            host: host.clone(),
+            port,
+            path: path.clone(),
+        };
+        let from_root = path.starts_with('/') || path.is_empty();
+        let text = match (port, url) {
+            (None, false) => format!("{host}:{path}"),
+            (port, _) => {
+                let port = port.map_or(String::new(), |port| format!(":{port}"));
+                let path = if from_root {
+                    path
+                } else {
+                    format!("/~/{path}")
+                };
+                format!("ssh://{host}{port}{path}")
+            }
+        };
+        (text, Location::Remote(place))
+    })
+}
+
 /// Every written form a location has, with the place it names.
 fn written() -> impl Strategy<Value = (String, Location)> {
     prop_oneof![
+        remote(),
         path().prop_map(|path| (path.clone(), Location::Local(path))),
         file_url().prop_map(|(url, path)| (url, Location::Local(path))),
         web_address().prop_map(|(url, kept)| (url, Location::Web(kept))),
@@ -157,6 +208,10 @@ fn near_location() -> impl Strategy<Value = String> {
         Just("peer:"),
         Just("s3://"),
         Just("C:"),
+        Just("host:"),
+        Just("user@host:"),
+        Just("ssh://"),
+        Just("ssh://host:"),
         Just(""),
     ];
     (start, "[ -~%é\\x00]{0,60}").prop_map(|(start, tail)| format!("{start}{tail}"))
@@ -210,13 +265,14 @@ proptest! {
 
     /// A build is refused nothing it lists and granted nothing it lacks.
     #[test]
-    fn a_build_reads_only_what_it_lists((text, _) in written(), keep in vec(any::<bool>(), 5)) {
+    fn a_build_reads_only_what_it_lists((text, _) in written(), keep in vec(any::<bool>(), 6)) {
         let listed: Vec<Protocol> = EVERY.iter().zip(&keep).filter(|(_, keep)| **keep).map(|(p, _)| *p).collect();
         let scheme = match parse(&text).unwrap() {
             Location::Local(_) => "file",
             Location::Web(url) if url.starts_with("https:") => "https",
             Location::Web(_) => "http",
             Location::Ticket(_) => "mux",
+            Location::Remote(_) => "ssh",
             Location::Serve => "peer",
         };
         let has = listed.iter().any(|protocol| protocol.scheme == scheme);

@@ -129,9 +129,17 @@ pub(super) async fn run(args: Args, json: bool, key: Option<&Path>) -> anyhow::R
     let mut outcome = Ok(());
     for source in sources {
         let Location::Local(to) = &to else {
+            let why = match &to {
+                Location::Remote(_) => {
+                    "Copying to a machine reached by SSH is not there yet: mux copies from one."
+                }
+                _ => {
+                    "It copies into a folder, or to `peer:`, which offers a file or a folder \
+                     to other machines."
+                }
+            };
             return misuse(format!(
-                "`cp` cannot copy from {} to {to}. It copies into a folder, or to \
-                 `peer:`, which offers a file or a folder to other machines.",
+                "`cp` cannot copy from {} to {to}. {why}",
                 source.in_a_message()
             ));
         };
@@ -356,10 +364,14 @@ pub(super) async fn sources(
     match location {
         #[cfg(feature = "web")]
         Location::Web(url) => on_the_web(url, hash, mirrors).await,
-        Location::Local(path) if hash.is_some() || !mirrors.is_empty() => misuse(format!(
-            "--hash and --mirror are for a source on the web, and {path} is not"
-        )),
+        Location::Local(_) | Location::Remote(_) if hash.is_some() || !mirrors.is_empty() => {
+            misuse(format!(
+                "--hash and --mirror are for a source on the web, and {location} is not"
+            ))
+        }
         Location::Local(path) => in_a_folder(path, to).await,
+        #[cfg(feature = "ssh")]
+        Location::Remote(remote) => on_another_machine(remote).await,
         Location::Ticket(_) => {
             misuse("a ticket cannot be read here yet. `mux cp TICKET FOLDER` copies what it names.")
         }
@@ -367,6 +379,25 @@ pub(super) async fn sources(
             "{other} is a place to copy to, and cannot be copied from"
         )),
     }
+}
+
+/// The file or the folder on a machine reached by SSH, as it is now. Every
+/// folder of it is listed, and none of it is read yet.
+#[cfg(feature = "ssh")]
+async fn on_another_machine(remote: &mux::Remote) -> anyhow::Result<Vec<Arc<dyn Source>>> {
+    let mut how = mux::ssh::Options::default();
+    // Another program to run in place of `ssh`, as `GIT_SSH` is for git.
+    if let Some(program) = std::env::var_os("MUX_SSH").filter(|program| !program.is_empty()) {
+        how.program = program;
+    }
+    let found = mux::ssh::Remote::find(&remote.host, remote.port, &remote.path, &how).await?;
+    if found.skipped() > 0 {
+        eprintln!(
+            "note: left out {} that cannot be copied (special files, links that leave the folder, unfinished copies)",
+            ui::plural(found.skipped(), "thing")
+        );
+    }
+    Ok(vec![Arc::new(found)])
 }
 
 /// The file at a web address, and at each mirror of it.

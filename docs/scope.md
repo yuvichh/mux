@@ -31,7 +31,8 @@ places they are given, and there is no configuration file.
 | Local folder or file | `./data`, `/srv/data` | 1 |
 | Web URL | `https://example.org/big.iso` | 1 |
 | Another machine | `peer:` to serve, a `mux://` ticket to fetch | 1 |
-| Cloud storage | `s3://`, `gs://`, `az://`, `sftp://` | 3 |
+| A machine reached by SSH | `host:path`, `ssh://host/path` | 3 |
+| Cloud storage | `s3://`, `gs://`, `az://` | 3 |
 | Model and container registries | `hf://`, `oci://` | 3 |
 | Torrents | `magnet:`, `.torrent` files | 3 |
 | A pipe | `-` | 3 |

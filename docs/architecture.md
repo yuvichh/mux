@@ -1,6 +1,6 @@
 # Architecture
 
-mux is built from five crates. Each depends only on the ones above it in
+mux is built from these crates. Each depends only on the ones above it in
 this table.
 
 | Crate | Responsibility | Knows about |
@@ -9,6 +9,8 @@ this table.
 | `engine` | What is the same for every place and every supplier: fetching chunks from many suppliers at once, checking a chunk before it is stored, and having a file committed when its last chunk is in | model |
 | `fs` | Local folders: hashing files into artifacts; reading and writing byte ranges; part files that are renamed into place when committed | model |
 | `peer` | Node identity, connections between nodes (iroh), wire messages, and the swarm: what a node serves, how it answers peers, and a peer as a supplier of chunks | model, engine, fs |
+| `web` | Web addresses: a file on an HTTP or HTTPS server as a place to read from | model |
+| `ssh` | Machines reached by SSH: a file or a folder on one as a place to read from, over SFTP carried by the system's own `ssh` | model |
 | `cli` | The `mux` command (argument parsing, progress bars, output) and the `mux` library, which re-exports the others | all of the above |
 
 `model` touches no disk, network or clock and does not use `std`.
@@ -367,6 +369,42 @@ with `Congestion::Bbr` (`--congestion bbr`), which is many times faster
 where packets are lost. With iroh that is BBR in its third version.
 [docs/performance.md](performance.md#packets-lost-for-other-reasons) has
 the figures.
+
+## Machines reached by SSH
+
+`host:path` names a file or a folder on a machine that `ssh` reaches. The
+`ssh` crate makes it a `Source`, and the engine copies from it as from any
+other.
+
+```
+ mux ──▶ ssh -s host sftp ══ the user's own SSH connection ══▶ sshd ──▶ sftp-server
+  │        (a child process)                                      (already there)
+  └─ SFTP packets on its input and output
+```
+
+- **Nothing of mux is on the other machine.** The child is the system's
+  `ssh`, run with the options OpenSSH's own `sftp` passes and asked for the
+  SFTP subsystem. Hosts of `~/.ssh/config`, keys, agents, jump hosts and
+  prompts are `ssh`'s business and work as they do there. The host comes
+  after `--`, and a host that begins with a dash is not read as one, so
+  nothing typed as a place can be taken for an option.
+- **`wire`** is the packets of SFTP version 3: what is asked, and what is
+  answered. It touches no pipe, never trusts a length it is sent, and has a
+  fuzz target.
+- **`session`** is the conversation. Every request has a number, and the
+  answer with that number goes to whoever asked. Asking does not wait, so a
+  megabyte is 32 requests that are all on their way before the first
+  answer, and many files are in flight at once.
+- **`remote`** looks at a place once: it lists every folder, sixteen at a
+  time, and reads no file. That gives the tree, with sizes, permissions,
+  times and links, by the rules a local folder is walked by. What tells one
+  version of a file from another is its size and its time. A file is held
+  to them when it is opened, so the bytes of two versions are never put
+  together.
+
+Tests run it against a server written for them, which can give short
+reads, send what was not asked for and hang up, and against the system's
+own `sftp-server` as a child process, which needs no login.
 
 ## Swarm
 

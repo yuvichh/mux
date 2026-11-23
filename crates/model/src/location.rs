@@ -1,4 +1,4 @@
-//! Naming a place: a path, a web address or a ticket.
+//! Naming a place: a path, a web address, a ticket or another machine.
 //!
 //! Every command takes the places it works on in one written form, and this
 //! module is the one reader of that form. It decides what kind of place a
@@ -39,10 +39,11 @@ const KNOWN: &[(&str, &str, Option<&str>)] = &[
     ("https", "web addresses", Some("web")),
     ("mux", "tickets", None),
     ("peer", "serving to other machines", None),
+    ("ssh", "machines reached by SSH", Some("ssh")),
+    ("sftp", "machines reached by SSH", Some("ssh")),
     ("s3", "cloud storage", None),
     ("gs", "cloud storage", None),
     ("az", "cloud storage", None),
-    ("sftp", "cloud storage", None),
     ("hf", "model registries", None),
     ("oci", "container registries", None),
     ("magnet", "torrents", None),
@@ -57,8 +58,25 @@ pub enum Location {
     Web(String),
     /// Content held by other machines.
     Ticket(Ticket),
+    /// A file or folder on a machine reached by SSH.
+    Remote(Remote),
     /// This machine, serving what it is given to other machines.
     Serve,
+}
+
+/// A file or folder on another machine, named as `scp` and `rsync` name
+/// one: `host:path`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remote {
+    /// The machine, as `ssh` is to be told it: a name, an address or a host
+    /// of the user's SSH configuration, with `user@` before it if a user
+    /// was given.
+    pub host: String,
+    /// The port, if one was given. Only `ssh://host:port/path` can say it.
+    pub port: Option<u16>,
+    /// The path there. One that does not begin with `/` is read from the
+    /// home folder, and an empty one is the home folder.
+    pub path: String,
 }
 
 impl Location {
@@ -83,15 +101,27 @@ impl Location {
                 "standard input and output (`-`) are not supported yet. For a file named `-`, write `./-`.",
             ));
         }
+        if let Some(remote) = remote_of(text) {
+            // It may have been meant as a file with a colon in its name.
+            require("ssh", text, protocols).map_err(|refused| {
+                invalid(format!(
+                    "{refused} If {text:?} is a file, write `./{text}`."
+                ))
+            })?;
+            return Ok(Self::Remote(remote));
+        }
         let Some((scheme, rest)) = scheme_of(text) else {
             require("file", text, protocols)?;
             return local(text);
         };
         let scheme = scheme.to_ascii_lowercase();
-        require(&scheme, text, protocols)?;
+        // `sftp:` is one more way to write `ssh:`.
+        let protocol = if scheme == "sftp" { "ssh" } else { &scheme };
+        require(protocol, text, protocols)?;
         match scheme.as_str() {
             "file" => local(&file_url_path(rest)?),
             "http" | "https" => web(&scheme, rest),
+            "ssh" | "sftp" => Ok(Self::Remote(remote_url(&scheme, rest)?)),
             "mux" => Ok(Self::Ticket(format!("mux:{rest}").parse()?)),
             "peer" if rest.is_empty() => Ok(Self::Serve),
             "peer" => Err(invalid(format!(
@@ -122,14 +152,141 @@ impl fmt::Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             // A path that would read as something else is marked as a path.
-            Self::Local(path) if path == "-" || scheme_of(path).is_some() => {
+            Self::Local(path)
+                if path == "-" || scheme_of(path).is_some() || remote_of(path).is_some() =>
+            {
                 write!(f, "./{path}")
             }
             Self::Local(text) | Self::Web(text) => f.write_str(text),
             Self::Ticket(ticket) => ticket.fmt(f),
+            Self::Remote(remote) => remote.fmt(f),
             Self::Serve => f.write_str("peer:"),
         }
     }
+}
+
+impl fmt::Display for Remote {
+    /// Prints `host:path` where that reads back as the same place, and
+    /// `ssh://host:port/path` where it would not: with a port, or a host
+    /// or a path that the short form would take for something else.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let short = format!("{}:{}", self.host, self.path);
+        if self.port.is_none() && remote_of(&short).as_ref() == Some(self) {
+            return f.write_str(&short);
+        }
+        write!(f, "ssh://{}", self.host)?;
+        if let Some(port) = self.port {
+            write!(f, ":{port}")?;
+        }
+        match self.path.as_str() {
+            "" => Ok(()),
+            path if path.starts_with('/') => f.write_str(path),
+            path => write!(f, "/~/{path}"),
+        }
+    }
+}
+
+/// Reads `[user@]host:path`, the way `scp` and `rsync` name a place on
+/// another machine. It is one if a colon comes before any slash, and what
+/// is before the colon can be a host: more than one character, since one
+/// letter and a colon is a Windows drive, and not the name of a scheme mux
+/// has a meaning for, as in `file:` or `peer:`.
+fn remote_of(text: &str) -> Option<Remote> {
+    // The host begins after `user@`, if a user is named.
+    let host_at = match text.find('@') {
+        Some(at) if !text[..at].contains([':', '/', '[']) => at + 1,
+        _ => 0,
+    };
+    let colon = match text[host_at..].strip_prefix('[') {
+        // An IPv6 address is in brackets and has colons of its own.
+        Some(v6) => host_at + v6.find(']')? + 2,
+        None => host_at + text[host_at..].find(':')?,
+    };
+    let (host, after) = text.split_at(colon);
+    let path = after.strip_prefix(':')?;
+    // One letter and a colon is a Windows drive, unless a user is named.
+    let drive = host.len() < 2 && !host.contains('@');
+    if drive || !is_host(host) || path.starts_with("//") || path.contains('\0') {
+        return None;
+    }
+    let lower = host.to_ascii_lowercase();
+    if KNOWN.iter().any(|(scheme, _, _)| *scheme == lower) {
+        return None;
+    }
+    Some(Remote {
+        host: host.to_owned(),
+        port: None,
+        path: from_home(path).to_owned(),
+    })
+}
+
+/// Whether `text` can be `[user@]host` for `ssh`: a name or an address, or
+/// an IPv6 address in brackets. It does not begin with a dash, which `ssh`
+/// would read as an option.
+fn is_host(text: &str) -> bool {
+    let (user, host) = match text.rsplit_once('@') {
+        Some((user, host)) => (Some(user), host),
+        None => (None, text),
+    };
+    let named = |part: &str, more: &[char]| {
+        !part.is_empty()
+            && !part.starts_with('-')
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || more.contains(&c))
+    };
+    let host_is = match host.strip_prefix('[').and_then(|v6| v6.strip_suffix(']')) {
+        Some(v6) => named(v6, &[':', '.', '%']),
+        None => named(host, &['.', '-', '_']),
+    };
+    host_is && user.is_none_or(|user| named(user, &['.', '-', '_', '+']))
+}
+
+/// A path on another machine without the `~/` that says it starts at the
+/// home folder: a path that does not begin with `/` starts there anyway.
+fn from_home(path: &str) -> &str {
+    match path.strip_prefix('~') {
+        Some("") => "",
+        Some(rest) => rest.strip_prefix('/').unwrap_or(path),
+        None => path,
+    }
+}
+
+/// Reads what follows `ssh:` in `ssh://[user@]host[:port][/path]`. The
+/// path starts at the root, and `/~/path` at the home folder.
+fn remote_url(scheme: &str, rest: &str) -> Result<Remote> {
+    let shape = format!(
+        "A machine reached by SSH is written `host:path`, or `{scheme}://host/path` to give a port as well."
+    );
+    let Some(after) = rest.strip_prefix("//") else {
+        return Err(invalid(format!("`{scheme}:` is followed by `//`. {shape}")));
+    };
+    let (authority, path) = after.split_at(after.find('/').unwrap_or(after.len()));
+    let Some((host, port)) = host_and_port(authority).filter(|(host, _)| is_host(host)) else {
+        return Err(invalid(format!(
+            "{authority:?} is not a host, or a host and a port number. {shape}"
+        )));
+    };
+    let port = match port {
+        Some(port) => Some(
+            port.parse::<u16>()
+                .map_err(|_| invalid(format!("{port:?} is not a port number. {shape}")))?,
+        ),
+        None => None,
+    };
+    if path.contains('\0') {
+        return Err(invalid("a path cannot contain a NUL character. Remove it."));
+    }
+    let path = match path.strip_prefix("/~") {
+        Some("") => "",
+        Some(home) if home.starts_with('/') => &home[1..],
+        _ => path,
+    };
+    Ok(Remote {
+        host: host.to_owned(),
+        port,
+        path: path.to_owned(),
+    })
 }
 
 /// Splits a scheme from what follows its colon. A scheme is a letter, then
@@ -327,6 +484,12 @@ mod tests {
             about: "a web address",
         },
     ];
+    const SSH: Protocol = Protocol {
+        scheme: "ssh",
+        reads: true,
+        writes: false,
+        about: "another machine",
+    };
     const SWARM: [Protocol; 2] = [
         Protocol {
             scheme: "mux",
@@ -343,7 +506,15 @@ mod tests {
     ];
 
     fn every() -> Vec<Protocol> {
-        [&[FILE][..], &WEB, &SWARM].concat()
+        [&[FILE][..], &WEB, &SWARM, &[SSH]].concat()
+    }
+
+    fn remote(host: &str, port: Option<u16>, path: &str) -> Location {
+        Location::Remote(Remote {
+            host: host.to_owned(),
+            port,
+            path: path.to_owned(),
+        })
     }
 
     fn parse(text: &str) -> Result<Location> {
@@ -518,9 +689,89 @@ mod tests {
     fn a_scheme_nobody_knows_lists_what_this_build_can_use() {
         let reason = refusal("ftp://example.org/file");
         assert!(reason.contains("`ftp:` is not a kind of place mux knows"));
-        assert!(reason.contains("file, http, https, mux, peer"));
-        // It may have been a file with a colon in its name.
-        assert!(refusal("notes:final").contains("write `./notes:final`"));
+        assert!(reason.contains("file, http, https, mux, peer, ssh"));
+    }
+
+    #[test]
+    fn a_host_and_a_path_name_a_place_on_another_machine() {
+        for (text, place) in [
+            (
+                "server:/var/log/app",
+                remote("server", None, "/var/log/app"),
+            ),
+            ("server:notes.txt", remote("server", None, "notes.txt")),
+            // The home folder, and a path written from it.
+            ("server:", remote("server", None, "")),
+            ("server:~", remote("server", None, "")),
+            ("server:~/site", remote("server", None, "site")),
+            (
+                "deploy@build.example.com:a b/c",
+                remote("deploy@build.example.com", None, "a b/c"),
+            ),
+            ("10.0.0.5:/srv", remote("10.0.0.5", None, "/srv")),
+            ("[fd00::1]:/srv", remote("[fd00::1]", None, "/srv")),
+            ("me@[fd00::1]:x", remote("me@[fd00::1]", None, "x")),
+            // One letter is a host when a user is named with it.
+            ("me@c:x", remote("me@c", None, "x")),
+            ("ssh://server/var/log", remote("server", None, "/var/log")),
+            (
+                "ssh://me@server:2222/srv",
+                remote("me@server", Some(2222), "/srv"),
+            ),
+            ("SSH://server", remote("server", None, "")),
+            ("ssh://server/~/site", remote("server", None, "site")),
+            ("sftp://server/srv", remote("server", None, "/srv")),
+            // One letter can be a host here: there is no drive to mistake it for.
+            ("ssh://c/srv", remote("c", None, "/srv")),
+        ] {
+            assert_eq!(parse(text), Ok(place), "{text}");
+        }
+    }
+
+    #[test]
+    fn what_is_not_a_host_and_a_path_stays_a_path() {
+        for text in [
+            // A slash before the colon: the colon is in a name.
+            "./notes:final",
+            "logs/2026:11",
+            // A Windows drive.
+            r"C:\data",
+            "C:data",
+            // No host is written like these.
+            "a b:c",
+            "-o:x",
+            "user@:x",
+            "@host:x",
+            "[fd00::1:/srv",
+        ] {
+            assert_eq!(parse(text), Ok(local(text)), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_place_on_another_machine_that_is_written_wrong_says_how_it_is_written() {
+        for text in [
+            "ssh:server/x",
+            "ssh://",
+            "ssh:///srv",
+            "ssh://-oProxyCommand=x/srv",
+            "ssh://server:port/srv",
+            "ssh://server:70000/srv",
+            "ssh://a b/srv",
+        ] {
+            let reason = refusal(text);
+            assert!(reason.contains("host:path"), "{text}: {reason}");
+        }
+    }
+
+    #[test]
+    fn a_build_without_ssh_says_what_a_file_with_a_colon_is_written_as() {
+        let without = [FILE];
+        let Err(Error::InvalidLocation(reason)) = Location::parse("notes:final", &without) else {
+            panic!("accepted");
+        };
+        assert!(reason.contains("without the `ssh` feature"), "{reason}");
+        assert!(reason.contains("write `./notes:final`"), "{reason}");
     }
 
     #[test]
@@ -529,7 +780,6 @@ mod tests {
             ("s3://bucket/key", "cloud storage"),
             ("gs://bucket/key", "cloud storage"),
             ("az://account/key", "cloud storage"),
-            ("sftp://host/path", "cloud storage"),
             ("hf://org/model", "model registries"),
             ("oci://registry/image", "container registries"),
             ("magnet:?xt=urn:btih:abc", "torrents"),
@@ -584,11 +834,21 @@ mod tests {
             r"C:\data",
             "https://example.org:8443/a?b#c",
             "peer:",
+            "server:/var/log/app",
+            "me@server:site",
+            "server:",
+            "ssh://server:2222/srv",
+            "ssh://server:2222/~/site",
+            // A host that the short form would take for something else.
+            "ssh://file/srv",
+            "ssh://c/srv",
         ] {
             let location = parse(text).unwrap();
             assert_eq!(location.to_string(), text);
             assert_eq!(parse(&location.to_string()).unwrap(), location);
         }
+        // The home folder is where a path starts that does not say more.
+        assert_eq!(parse("server:~/site").unwrap().to_string(), "server:site");
         // A file URL prints as the path it holds.
         assert_eq!(parse("file:///srv/a%20b").unwrap().to_string(), "/srv/a b");
     }

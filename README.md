@@ -87,6 +87,7 @@ go to `.mux-trash` by default.
 
 | Command | Use |
 | --- | --- |
+| `mux cp server:/srv/site ./` | Copy from a machine you can `ssh` to. Nothing is installed there. |
 | `mux cp URL ./downloads/` | Download a file over HTTP or HTTPS. |
 | `mux cp ./photos ./archive/` | Copy a local directory with its metadata. |
 | `mux probe 'TICKET'` | Inspect a snapshot and see which peers have it. |
